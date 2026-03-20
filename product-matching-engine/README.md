@@ -27,6 +27,8 @@ This user-friendly application helps you find matching products between two list
 - **GTIN Quality Report**: An expandable report that provides detailed statistics on the quality of your GTIN data, including valid, correctable, and invalid codes.
 - **Detailed Results Table**: View all matches with sortable columns for overall confidence, TF-IDF, Fuzzy, and GTIN scores.
 - **Download Options**: Export your matched results to either CSV or Excel for further analysis.
+- **Threshold Explorer**: For within-file grouping, explore how groups change across different similarity thresholds.
+- **Excel Integration**: Export enhanced data for Excel-based threshold analysis using Power Pivot or formulas.
 
 ## How to Run the Application
 
@@ -70,6 +72,27 @@ This will open the application in your default web browser.
 4.  **(Optional) Set Restrictions**: In "Find Similar Within File" mode, you can restrict matches to products within the same category, commodity, or other columns.
 5.  **Find Matches**: Click the "Find Matches" button to start the analysis.
 6.  **Review Results**: Examine the match summary, GTIN quality report, and the detailed results table. Download the results if needed.
+
+## Excel Integration
+
+The application offers powerful Excel export capabilities for advanced threshold analysis:
+
+### Standard Export
+- **CSV/Excel**: Download basic match results for immediate use.
+
+### Enhanced Threshold Analysis Export
+When using "Find Similar Within File" with grouping enabled:
+- **Threshold Explorer Workbook**: Contains pre-calculated groups at different thresholds.
+- **Enhanced Excel for Analysis**: Includes similarity matrix data for custom Excel analysis.
+
+### Excel Analysis Options
+1. **Power Pivot Method** (Recommended): Create dynamic threshold explorer with slicers
+2. **Formula Method**: Use Excel formulas for custom threshold analysis
+3. **Pivot Table Method**: Analyze patterns with Excel PivotTables
+
+For detailed instructions, see:
+- `EXCEL_THRESHOLD_EXPLORER.md` - Complete guide for Excel-based analysis
+- `POWER_PIVOT_TEMPLATE.md` - Advanced Power Pivot techniques and templates
 
 ## Matching Engine Explained
 

@@ -67,6 +67,7 @@ def setup_sidebar():
             selected_restrictions = []
         
         # === GROUPING OPTIONS (FOR WITHIN FILE MODE) ===
+        similarity_threshold = 50  # Default value
         if matching_mode == "Find Similar Within File":
             st.subheader("🔗 Grouping Options")
             
@@ -128,28 +129,34 @@ def setup_sidebar():
             enable_threshold_explorer = False
             threshold_range = (50, 80)
         
-        # === SIMPLE SETTINGS FOR EVERYONE ===
-        st.subheader("🎯 Basic Settings")
+        # === SIMPLE SETTINGS FOR EVERYONE (continued) ===
+        # Show strictness slider only if threshold explorer is not enabled
+        if not (matching_mode == "Find Similar Within File" and group_results and enable_threshold_explorer):
+            st.subheader("🎯 Basic Settings")
+            
+            # Matching Strictness (optimized for food items)
+            strictness = st.select_slider(
+                "How strict should matching be?",
+                options=["Very Lenient", "Lenient", "Balanced", "Strict", "Very Strict"],
+                value="Lenient",
+                help="Food products often have variations in naming. 'Lenient' is recommended for specialty foods."
+            )
+            
+            # Convert strictness to threshold (much more lenient for food items)
+            strictness_map = {
+                "Very Lenient": 40,  # Catch very loose matches
+                "Lenient": 50,       # Good for food variations
+                "Balanced": 60,      # Still quite permissive
+                "Strict": 70,        # More selective
+                "Very Strict": 80    # Only close matches
+            }
+            similarity_threshold = strictness_map[strictness]
+        else:
+            # When threshold explorer is enabled, use the middle of the range as default
+            similarity_threshold = (threshold_range[0] + threshold_range[1]) // 2
+            st.info("📊 **Threshold Explorer Active**: Similarity threshold will be controlled by the threshold explorer above.")
         
-        # Matching Strictness (optimized for food items)
-        strictness = st.select_slider(
-            "How strict should matching be?",
-            options=["Very Lenient", "Lenient", "Balanced", "Strict", "Very Strict"],
-            value="Lenient",
-            help="Food products often have variations in naming. 'Lenient' is recommended for specialty foods."
-        )
-        
-        # Convert strictness to threshold (much more lenient for food items)
-        strictness_map = {
-            "Very Lenient": 40,  # Catch very loose matches
-            "Lenient": 50,       # Good for food variations
-            "Balanced": 60,      # Still quite permissive
-            "Strict": 70,        # More selective
-            "Very Strict": 80    # Only close matches
-        }
-        similarity_threshold = strictness_map[strictness]
-        
-        # Matching method toggles
+        # Show matching methods after basic settings (or after threshold explorer info)
         st.subheader("🔍 Matching Methods")
         
         enable_text_matching = st.checkbox(
@@ -279,7 +286,13 @@ def setup_sidebar():
         else:
             result_scope_desc = f"up to {max_matches_per_product} matches per product"
 
-        st.info(f"🍽️ **Setup:** {strictness.lower()} ({threshold_desc}) • {methods_desc}{restriction_desc} • {result_scope_desc}")
+        # Determine strictness display text
+        if matching_mode == "Find Similar Within File" and group_results and enable_threshold_explorer:
+            strictness_text = "threshold explorer"
+        else:
+            strictness_text = strictness.lower()
+
+        st.info(f"🍽️ **Setup:** {strictness_text} ({threshold_desc}) • {methods_desc}{restriction_desc} • {result_scope_desc}")
         
         # Method-specific tips
         if enable_text_matching and enable_gtin_matching:
@@ -297,10 +310,12 @@ def setup_sidebar():
             st.warning("⚠️ No matching methods selected - please enable at least one method.")
         
         # General warnings
-        if similarity_threshold > 70:
-            st.warning("⚠️ High strictness may miss valid food variations (e.g., 'Olive Oil' vs 'Extra Virgin Olive Oil')")
-        elif similarity_threshold < 45:
-            st.warning("⚠️ Very low strictness may include unrelated food items")
+        if not (matching_mode == "Find Similar Within File" and group_results and enable_threshold_explorer):
+            # Only show these warnings when threshold explorer is not active
+            if similarity_threshold > 70:
+                st.warning("⚠️ High strictness may miss valid food variations (e.g., 'Olive Oil' vs 'Extra Virgin Olive Oil')")
+            elif similarity_threshold < 45:
+                st.warning("⚠️ Very low strictness may include unrelated food items")
         
         if not enable_text_matching and not enable_gtin_matching:
             st.error("❌ At least one matching method must be enabled!")
