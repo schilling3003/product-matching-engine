@@ -107,6 +107,7 @@ def main():
                                                   settings['enable_gtin_matching'], settings['matching_mode'])
 
             if st.button("✨ Find Matches"):
+                st.session_state.pop('match_results', None)
                 with st.spinner("Processing... this may take a moment for large files."):
                     start_time = time.time()
 
@@ -440,11 +441,9 @@ def main():
                         results_df = _sanitize_for_streamlit(results_df)
                         total_products = len(cleaned_customer_df)
 
-                        if use_grouping and settings.get('max_groups') is not None:
-                            st.caption(f"Showing top {settings['max_groups']} groups by size (Maximum groups to show setting).")
-
                         threshold_summary_df = pd.DataFrame()
                         threshold_export_df = pd.DataFrame()
+                        threshold_values = []
                         if use_grouping and settings.get('enable_threshold_explorer', False):
                             threshold_values, threshold_summary_df, threshold_export_df = compute_threshold_explorer(
                                 similarity_matrix=combined_matrix,
@@ -458,136 +457,165 @@ def main():
                             )
                             threshold_summary_df['Singletons'] = total_products - threshold_summary_df['Products in Groups']
 
-                            st.subheader("🎚️ Threshold Explorer")
-                            st.dataframe(threshold_summary_df, use_container_width=True)
-
-                            preview_threshold = st.selectbox(
-                                "Preview grouped results at threshold",
-                                threshold_values,
-                                index=threshold_values.index(settings['similarity_threshold'])
-                                if settings['similarity_threshold'] in threshold_values else 0,
-                            )
-                            threshold_preview_df = threshold_export_df[
-                                threshold_export_df['Threshold'] == preview_threshold
-                            ] if not threshold_export_df.empty else pd.DataFrame()
-                            if not threshold_preview_df.empty:
-                                st.dataframe(threshold_preview_df, use_container_width=True)
-
-                        # --- Display Stats ---
-                        st.subheader("📊 Match Summary")
-                        col1, col2, col3, col4 = st.columns(4)
-                        
-                        if use_grouping:
-                            if {'Group ID', 'Group Summary'}.issubset(results_df.columns):
-                                unique_groups = results_df['Group ID'].nunique()
-                                products_in_groups = len(results_df)
-                                avg_confidence = pd.to_numeric(results_df['Group Avg Similarity'], errors='coerce').mean()
-                                
-                                col1.metric("Total Products", f"{total_products}")
-                                col2.metric("Groups Found", f"{unique_groups}")
-                                col3.metric("Products in Groups", f"{products_in_groups}")
-                                col4.metric("Avg. Similarity", f"{avg_confidence:.2f}%")
-                            elif 'Group ID' in results_df.columns and 'Confidence Score' in results_df.columns:
-                                # Pairwise within groups
-                                total_matches = len(results_df)
-                                avg_confidence = pd.to_numeric(results_df['Confidence Score'].str.replace('%', '')).mean()
-                                col1.metric("Total Products", f"{total_products}")
-                                col2.metric("Total Matches", f"{total_matches}")
-                                col3.metric("Groups Found", f"{results_df['Group ID'].nunique()}")
-                                col4.metric("Avg. Confidence", f"{avg_confidence:.2f}%")
-                        elif is_within_file:
-                            # For within-file mode, count unique product pairs
-                            unique_pairs = set()
-                            for _, row in results_df.iterrows():
-                                pair = tuple(sorted([row['Product 1'], row['Product 2']]))
-                                unique_pairs.add(pair)
-                            products_with_matches = len(unique_pairs)
-                            total_matches = len(results_df)
-                            avg_confidence = pd.to_numeric(results_df['Confidence Score'].str.replace('%', '')).mean()
-                            
-                            col1.metric("Total Products", f"{total_products}")
-                            col2.metric("Unique Similar Pairs", f"{products_with_matches}")
-                            col3.metric("Total Matches", f"{total_matches}")
-                            col4.metric("Avg. Confidence", f"{avg_confidence:.2f}%")
-                        else:
-                            # Original two-file mode
-                            products_with_matches = results_df['Customer Product'].nunique()
-                            total_matches = len(results_df)
-                            avg_confidence = pd.to_numeric(results_df['Confidence Score'].str.replace('%', '')).mean()
-                            
-                            col1.metric("Total Customer Products", f"{total_products}")
-                            col2.metric("Products with Matches", f"{products_with_matches}")
-                            col3.metric("Total Matches Found", f"{total_matches}")
-                            col4.metric("Avg. Confidence", f"{avg_confidence:.2f}%")
-
-                        st.dataframe(results_df)
-
-                        # --- Download Buttons ---
-                        st.subheader("📥 Download Results")
-                        
-                        # Add export format options for grouped results
-                        if use_grouping and 'Group ID' in results_df.columns:
-                            export_format = st.radio(
-                                "Export Format",
-                                ["Grouped Members", "Pairwise within Groups"],
-                                help="Grouped Members: One row per product with group metadata\nPairwise: Pair combinations within each group"
-                            )
-                            
-                            if export_format == "Pairwise within Groups":
-                                export_df = process_grouped_results(
-                                    similarity_matrix=combined_matrix,
-                                    product_df=cleaned_customer_df,
-                                    product_names=product_names,
-                                    similarity_threshold=settings['similarity_threshold'],
-                                    min_group_size=settings.get('min_group_size', 2),
-                                    max_groups=settings.get('max_groups', None),
-                                    group_view_mode=False,
-                                    selected_output_columns=selected_group_output_cols,
-                                    conservative_grouping=True,
-                                )
-                            else:
-                                export_df = results_df
-                        else:
-                            export_df = results_df
-
-                        export_df = _sanitize_for_streamlit(export_df)
-                        
-                        col1_dl, col2_dl = st.columns(2)
-                        
-                        def to_excel(df):
-                            output = BytesIO()
-                            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                                df.to_excel(writer, index=False, sheet_name='Matches')
-                            processed_data = output.getvalue()
-                            return processed_data
-
-                        with col1_dl:
-                            st.download_button(
-                                label="📄 Download as CSV",
-                                data=export_df.to_csv(index=False).encode('utf-8'),
-                                file_name='product_matches.csv',
-                                mime='text/csv',
-                            )
-                        with col2_dl:
-                            st.download_button(
-                                label="📊 Download as Excel",
-                                data=to_excel(export_df),
-                                file_name='product_matches.xlsx',
-                                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                            )
-
-                        if use_grouping and not threshold_summary_df.empty and not threshold_export_df.empty:
-                            st.download_button(
-                                label="📈 Download Threshold Explorer Workbook",
-                                data=build_threshold_workbook(_sanitize_for_streamlit(threshold_export_df), threshold_summary_df),
-                                file_name='group_threshold_explorer.xlsx',
-                                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                            )
+                        # Persist everything needed for rendering into session_state
+                        st.session_state['match_results'] = {
+                            'results_df': results_df,
+                            'total_products': total_products,
+                            'use_grouping': use_grouping,
+                            'is_within_file': is_within_file,
+                            'threshold_values': threshold_values,
+                            'threshold_summary_df': threshold_summary_df,
+                            'threshold_export_df': threshold_export_df,
+                            'max_groups': settings.get('max_groups'),
+                            'show_max_groups_caption': use_grouping and settings.get('max_groups') is not None,
+                            'similarity_threshold': settings['similarity_threshold'],
+                        }
                     else:
+                        st.session_state['match_results'] = None
                         st.warning("No matches found with the current settings.")
 
         except Exception as e:
             st.error(f"An error occurred: {e}")
+
+    # --- Render results from session_state (survives widget-triggered reruns) ---
+    match_results = st.session_state.get('match_results')
+    if match_results:
+        results_df = match_results['results_df']
+        total_products = match_results['total_products']
+        use_grouping = match_results['use_grouping']
+        is_within_file = match_results['is_within_file']
+        threshold_values = match_results['threshold_values']
+        threshold_summary_df = match_results['threshold_summary_df']
+        threshold_export_df = match_results['threshold_export_df']
+        similarity_threshold = match_results['similarity_threshold']
+
+        if match_results.get('show_max_groups_caption'):
+            st.caption(f"Showing top {match_results['max_groups']} groups by size (Maximum groups to show setting).")
+
+        # --- Threshold Explorer ---
+        if use_grouping and threshold_values:
+            st.subheader("🎚️ Threshold Explorer")
+            st.dataframe(threshold_summary_df, use_container_width=True)
+
+            preview_threshold = st.selectbox(
+                "Preview grouped results at threshold",
+                threshold_values,
+                index=threshold_values.index(similarity_threshold)
+                if similarity_threshold in threshold_values else 0,
+                key="preview_threshold",
+            )
+            threshold_preview_df = threshold_export_df[
+                threshold_export_df['Threshold'] == preview_threshold
+            ] if not threshold_export_df.empty else pd.DataFrame()
+            if not threshold_preview_df.empty:
+                st.dataframe(threshold_preview_df, use_container_width=True)
+
+        # --- Display Stats ---
+        st.subheader("📊 Match Summary")
+        col1, col2, col3, col4 = st.columns(4)
+
+        if use_grouping:
+            if {'Group ID', 'Group Summary'}.issubset(results_df.columns):
+                unique_groups = results_df['Group ID'].nunique()
+                products_in_groups = len(results_df)
+                avg_confidence = pd.to_numeric(results_df['Group Avg Similarity'], errors='coerce').mean()
+
+                col1.metric("Total Products", f"{total_products}")
+                col2.metric("Groups Found", f"{unique_groups}")
+                col3.metric("Products in Groups", f"{products_in_groups}")
+                col4.metric("Avg. Similarity", f"{avg_confidence:.2f}%")
+            elif 'Group ID' in results_df.columns and 'Confidence Score' in results_df.columns:
+                total_matches = len(results_df)
+                avg_confidence = pd.to_numeric(results_df['Confidence Score'].str.replace('%', '')).mean()
+                col1.metric("Total Products", f"{total_products}")
+                col2.metric("Total Matches", f"{total_matches}")
+                col3.metric("Groups Found", f"{results_df['Group ID'].nunique()}")
+                col4.metric("Avg. Confidence", f"{avg_confidence:.2f}%")
+        elif is_within_file:
+            unique_pairs = set()
+            for _, row in results_df.iterrows():
+                pair = tuple(sorted([row['Product 1'], row['Product 2']]))
+                unique_pairs.add(pair)
+            products_with_matches = len(unique_pairs)
+            total_matches = len(results_df)
+            avg_confidence = pd.to_numeric(results_df['Confidence Score'].str.replace('%', '')).mean()
+
+            col1.metric("Total Products", f"{total_products}")
+            col2.metric("Unique Similar Pairs", f"{products_with_matches}")
+            col3.metric("Total Matches", f"{total_matches}")
+            col4.metric("Avg. Confidence", f"{avg_confidence:.2f}%")
+        else:
+            products_with_matches = results_df['Customer Product'].nunique()
+            total_matches = len(results_df)
+            avg_confidence = pd.to_numeric(results_df['Confidence Score'].str.replace('%', '')).mean()
+
+            col1.metric("Total Customer Products", f"{total_products}")
+            col2.metric("Products with Matches", f"{products_with_matches}")
+            col3.metric("Total Matches Found", f"{total_matches}")
+            col4.metric("Avg. Confidence", f"{avg_confidence:.2f}%")
+
+        st.dataframe(results_df)
+
+        # --- Download Buttons ---
+        st.subheader("📥 Download Results")
+
+        if use_grouping and 'Group ID' in results_df.columns:
+            export_format = st.radio(
+                "Export Format",
+                ["Grouped Members", "Pairwise within Groups"],
+                help="Grouped Members: One row per product with group metadata\nPairwise: Pair combinations within each group",
+                key="export_format_radio",
+            )
+
+            if export_format == "Pairwise within Groups":
+                export_df = process_grouped_results(
+                    similarity_matrix=None,
+                    product_df=None,
+                    product_names=None,
+                    similarity_threshold=similarity_threshold,
+                    min_group_size=2,
+                    max_groups=match_results['max_groups'],
+                    group_view_mode=False,
+                    selected_output_columns=[],
+                    conservative_grouping=True,
+                )
+            else:
+                export_df = results_df
+        else:
+            export_df = results_df
+
+        export_df = _sanitize_for_streamlit(export_df)
+
+        col1_dl, col2_dl = st.columns(2)
+
+        def to_excel(df):
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df.to_excel(writer, index=False, sheet_name='Matches')
+            return output.getvalue()
+
+        with col1_dl:
+            st.download_button(
+                label="📄 Download as CSV",
+                data=export_df.to_csv(index=False).encode('utf-8'),
+                file_name='product_matches.csv',
+                mime='text/csv',
+            )
+        with col2_dl:
+            st.download_button(
+                label="📊 Download as Excel",
+                data=to_excel(export_df),
+                file_name='product_matches.xlsx',
+                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+
+        if use_grouping and not threshold_summary_df.empty and not threshold_export_df.empty:
+            st.download_button(
+                label="📈 Download Threshold Explorer Workbook",
+                data=build_threshold_workbook(_sanitize_for_streamlit(threshold_export_df), threshold_summary_df),
+                file_name='group_threshold_explorer.xlsx',
+                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
 
 if __name__ == "__main__":
     main()
