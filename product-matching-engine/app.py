@@ -20,69 +20,55 @@ def _sanitize_for_streamlit(df: pd.DataFrame) -> pd.DataFrame:
             )
     return safe_df
 
-def convert_streaming_results_to_dataframe(streaming_results, cleaned_customer_df, cleaned_catalog_df, 
-                                         column_config, is_within_file, settings):
-    """Convert streaming results to the expected DataFrame format."""
+def convert_streaming_results_to_dataframe(streaming_results, cleaned_customer_df, cleaned_catalog_df,
+                                         column_config, is_within_file, settings, gtin_details=None):
+    """Convert chunked extraction results (list of tuples) to the expected DataFrame format."""
     if not streaming_results:
         return pd.DataFrame()
-    
-    results = []
+
     customer_display_col = column_config['customer']['product_cols'][0]
     catalog_display_col = column_config['catalog']['product_cols'][0]
-    
-    for match in streaming_results:
-        i = match['customer_idx']
-        j = match['catalog_idx']
-        
+    customer_out_cols = column_config['customer'].get('output_cols', [])
+    catalog_out_cols = column_config['catalog'].get('output_cols', [])
+
+    rows = []
+    for rec in streaming_results:
+        i, j, combined, tfidf_s, fuzzy_s, gtin_s = rec
+
         if is_within_file:
-            # For within-file mode, show Product 1 and Product 2
-            result_entry = {
+            entry = {
                 'Product 1': cleaned_customer_df.iloc[i][customer_display_col],
                 'Product 2': cleaned_catalog_df.iloc[j][catalog_display_col],
-                'Confidence Score': f"{match['confidence_score']:.2f}%",
-                'TF-IDF Score': f"{match['tfidf_score']:.2f}%",
-                'Fuzzy Score': f"{match['fuzzy_score']:.2f}%"
+                'Confidence Score': f"{combined:.2f}%",
+                'TF-IDF Score': f"{tfidf_s:.2f}%",
+                'Fuzzy Score': f"{fuzzy_s:.2f}%",
             }
         else:
-            # Original two-file mode
-            result_entry = {
+            entry = {
                 'Customer Product': cleaned_customer_df.iloc[i][customer_display_col],
                 'Catalog Product': cleaned_catalog_df.iloc[j][catalog_display_col],
-                'Confidence Score': f"{match['confidence_score']:.2f}%",
-                'TF-IDF Score': f"{match['tfidf_score']:.2f}%",
-                'Fuzzy Score': f"{match['fuzzy_score']:.2f}%"
+                'Confidence Score': f"{combined:.2f}%",
+                'TF-IDF Score': f"{tfidf_s:.2f}%",
+                'Fuzzy Score': f"{fuzzy_s:.2f}%",
             }
-        
-        # Add GTIN score if available
-        if match['gtin_score'] > 0:
-            result_entry['GTIN Score'] = f"{match['gtin_score']:.2f}%"
-        
-        # Add GTIN match details if available
-        if 'gtin_match_type' in match:
-            result_entry['GTIN Match Type'] = match['gtin_match_type']
-            result_entry['Matching GTINs'] = match['matching_gtins']
-        
-        # Add additional customer columns if selected
-        if column_config['customer']['output_cols']:
-            for col in column_config['customer']['output_cols']:
-                if col in cleaned_customer_df.columns:
-                    if is_within_file:
-                        result_entry[f'Product 1 {col}'] = cleaned_customer_df.iloc[i][col]
-                    else:
-                        result_entry[f'Customer {col}'] = cleaned_customer_df.iloc[i][col]
-        
-        # Add additional catalog columns if selected
-        if column_config['catalog']['output_cols']:
-            for col in column_config['catalog']['output_cols']:
-                if col in cleaned_catalog_df.columns:
-                    if is_within_file:
-                        result_entry[f'Product 2 {col}'] = cleaned_catalog_df.iloc[j][col]
-                    else:
-                        result_entry[f'Catalog {col}'] = cleaned_catalog_df.iloc[j][col]
-        
-        results.append(result_entry)
-    
-    return pd.DataFrame(results)
+
+        if gtin_s > 0:
+            entry['GTIN Score'] = f"{gtin_s:.2f}%"
+        if gtin_details and (i, j) in gtin_details:
+            d = gtin_details[(i, j)]
+            entry['GTIN Match Type'] = d['match_type']
+            entry['Matching GTINs'] = ', '.join(d['matching_gtins'][:3])
+
+        for col in customer_out_cols:
+            if col in cleaned_customer_df.columns:
+                entry[f'Product 1 {col}' if is_within_file else f'Customer {col}'] = cleaned_customer_df.iloc[i][col]
+        for col in catalog_out_cols:
+            if col in cleaned_catalog_df.columns:
+                entry[f'Product 2 {col}' if is_within_file else f'Catalog {col}'] = cleaned_catalog_df.iloc[j][col]
+
+        rows.append(entry)
+
+    return pd.DataFrame(rows)
 
 def main():
     """
@@ -245,7 +231,7 @@ def main():
                         print("📊 Converting streaming results to DataFrame...")
                         results_df = convert_streaming_results_to_dataframe(
                             streaming_results, cleaned_customer_df, cleaned_catalog_df,
-                            column_config, is_within_file, settings
+                            column_config, is_within_file, settings, gtin_details=gtin_details
                         )
                         # Filter to top matches per product if needed
                         if settings['max_matches_per_product'] and not is_within_file:

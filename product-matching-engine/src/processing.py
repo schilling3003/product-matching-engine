@@ -198,31 +198,19 @@ def calculate_similarity_memory_efficient(customer_texts, catalog_texts, custome
                                         similarity_threshold=50, early_filter=True, enable_multiprocessing=True, batch_size=1000,
                                         within_file_mode=False, progress_callback=None, max_memory_mb=1500):
     """
-    Memory-efficient similarity calculation that processes data in chunks.
-    Returns identical results but uses dramatically less memory.
+    Memory-efficient similarity calculation.
+    For large datasets: processes in chunks, extracts results immediately, discards chunk matrices.
+    Maintains vectorized speed while keeping memory constant.
     """
     n_customers = len(customer_texts)
     n_catalog = len(catalog_texts)
-    
-    # Check if we should use memory-efficient mode
-    estimated_memory_mb = (n_customers * n_catalog * 8 * 4) / 1024 / 1024  # 4 matrices, float64
+
+    estimated_memory_mb = (n_customers * n_catalog * 8 * 4) / 1024 / 1024
     use_chunked = estimated_memory_mb > max_memory_mb or n_customers > 10000
-    
-    # Check for ultra-large datasets that need streaming
-    use_streaming = estimated_memory_mb > 4000 or n_customers * n_catalog > 50_000_000
-    
-    if use_streaming:
-        print(f"🌊 Ultra-large dataset detected: {estimated_memory_mb:.0f}MB estimated")
-        return stream_similarity_results(
-            customer_texts, catalog_texts, customer_vectors, catalog_vectors,
-            tfidf_weight, fuzzy_weight, gtin_weight, size_weight,
-            customer_sizes, catalog_sizes, size_tolerance,
-            customer_gtins, catalog_gtins, similarity_threshold, early_filter,
-            enable_multiprocessing, within_file_mode, progress_callback
-        )
-    elif use_chunked:
-        print(f"🧠 Memory-efficient mode: Estimated {estimated_memory_mb:.0f}MB > {max_memory_mb}MB limit")
-        return _calculate_similarity_chunked(
+
+    if use_chunked:
+        print(f"🧠 Chunked mode: {estimated_memory_mb:.0f}MB estimated, processing in chunks")
+        return _chunked_extract_results(
             customer_texts, catalog_texts, customer_vectors, catalog_vectors,
             tfidf_weight, fuzzy_weight, gtin_weight, size_weight,
             customer_sizes, catalog_sizes, size_tolerance,
@@ -230,7 +218,6 @@ def calculate_similarity_memory_efficient(customer_texts, catalog_texts, custome
             enable_multiprocessing, batch_size, within_file_mode, progress_callback
         )
     else:
-        # Use original implementation for smaller datasets
         return calculate_similarity_vectorized(
             customer_texts, catalog_texts, customer_vectors, catalog_vectors,
             tfidf_weight, fuzzy_weight, gtin_weight, size_weight,
@@ -238,6 +225,139 @@ def calculate_similarity_memory_efficient(customer_texts, catalog_texts, custome
             customer_gtins, catalog_gtins, similarity_threshold, early_filter,
             enable_multiprocessing, batch_size, within_file_mode, progress_callback
         )
+
+
+def _chunked_extract_results(customer_texts, catalog_texts, customer_vectors, catalog_vectors,
+                             tfidf_weight, fuzzy_weight, gtin_weight, size_weight,
+                             customer_sizes, catalog_sizes, size_tolerance,
+                             customer_gtins, catalog_gtins, similarity_threshold, early_filter,
+                             enable_multiprocessing, batch_size, within_file_mode, progress_callback):
+    """
+    Vectorized chunk processing that never stores full N×N matrices.
+    Each chunk is processed fully (TF-IDF, fuzzy, size, GTIN), results above threshold
+    are extracted immediately, then the chunk matrices are discarded.
+    This preserves full vectorized speed with constant memory usage.
+    """
+    n_customers = len(customer_texts)
+    n_catalog = len(catalog_texts)
+
+    # Chunk size: keep each chunk's matrices under ~200MB
+    # chunk_size rows × n_catalog cols × 8 bytes × 4 matrices
+    chunk_size = max(50, min(500, int(200 * 1024 * 1024 / (n_catalog * 8 * 4))))
+    print(f"🔄 Chunked extraction: {n_customers:,} products in chunks of {chunk_size:,}")
+
+    # Accumulate only the sparse results, not full matrices
+    match_results = []   # list of (i, j, combined, tfidf, fuzzy, gtin) tuples
+    gtin_details = {}
+
+    for chunk_start in range(0, n_customers, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, n_customers)
+        chunk_len = chunk_end - chunk_start
+
+        if progress_callback is not None:
+            progress_callback(chunk_start / n_customers, chunk_start, n_customers)
+
+        # --- TF-IDF (vectorized) ---
+        if tfidf_weight > 0 and customer_vectors is not None and catalog_vectors is not None:
+            chunk_tfidf = cosine_similarity(customer_vectors[chunk_start:chunk_end], catalog_vectors) * 100
+        else:
+            chunk_tfidf = np.zeros((chunk_len, n_catalog))
+
+        # --- Fuzzy (vectorized candidates only) ---
+        chunk_fuzzy = np.zeros((chunk_len, n_catalog))
+        if fuzzy_weight > 0:
+            min_tfidf_for_fuzzy = max(5, similarity_threshold * 0.2)
+            top_k = min(1000, max(50, int(0.1 * n_catalog)))
+
+            for i_local in range(chunk_len):
+                i_global = chunk_start + i_local
+                tfidf_row = chunk_tfidf[i_local]
+
+                above_thresh = np.where(tfidf_row >= min_tfidf_for_fuzzy)[0]
+                k = min(top_k, max(1, n_catalog - 1))
+                topk_idx = np.argpartition(-tfidf_row, kth=k)[:top_k]
+                candidates = np.unique(np.concatenate([above_thresh, topk_idx]))
+                if within_file_mode:
+                    candidates = candidates[candidates != i_global]
+
+                cust_text = customer_texts[i_global]
+                for j in candidates:
+                    chunk_fuzzy[i_local, j] = fuzz.token_set_ratio(cust_text, catalog_texts[j])
+
+        # --- Size (vectorized) ---
+        chunk_size_mat = np.zeros((chunk_len, n_catalog))
+        if size_weight > 0 and customer_sizes is not None and catalog_sizes is not None:
+            for i_local in range(chunk_len):
+                cs = customer_sizes[chunk_start + i_local]
+                if cs:
+                    for j, cat_size in enumerate(catalog_sizes):
+                        chunk_size_mat[i_local, j] = calculate_size_similarity(cs, cat_size, size_tolerance)
+
+        # --- GTIN ---
+        chunk_gtin = np.zeros((chunk_len, n_catalog))
+        chunk_gtin_details = {}
+        if gtin_weight > 0 and customer_gtins is not None and catalog_gtins is not None:
+            for i_local in range(chunk_len):
+                i_global = chunk_start + i_local
+                cust_pool = customer_gtins[i_global]
+                if not cust_pool:
+                    continue
+                for j, cat_pool in enumerate(catalog_gtins):
+                    if not cat_pool:
+                        continue
+                    common = set(cust_pool.keys()) & set(cat_pool.keys())
+                    if not common:
+                        continue
+                    best_conf, best_type, best_gtins = 0.0, 'No Match', []
+                    for gtin in common:
+                        conf, mtype = _get_gtin_confidence(cust_pool[gtin], cat_pool[gtin])
+                        if conf > best_conf:
+                            best_conf, best_type, best_gtins = conf, mtype, [gtin]
+                        elif conf == best_conf:
+                            best_gtins.append(gtin)
+                    if best_conf > 0:
+                        chunk_gtin[i_local, j] = best_conf
+                        chunk_gtin_details[(i_local, j)] = {
+                            'confidence': best_conf,
+                            'match_type': best_type,
+                            'matching_gtins': best_gtins[:3]
+                        }
+
+        # --- Combine scores (vectorized) ---
+        chunk_combined = _calculate_combined_score(
+            chunk_tfidf, chunk_fuzzy, chunk_gtin, chunk_size_mat,
+            tfidf_weight, fuzzy_weight, gtin_weight, size_weight
+        )
+
+        # --- Extract results above threshold immediately (sparse) ---
+        if within_file_mode:
+            for i_local in range(chunk_len):
+                chunk_combined[i_local, chunk_start + i_local] = 0.0
+
+        above = np.argwhere(chunk_combined >= similarity_threshold)
+        for i_local, j in above:
+            i_global = chunk_start + i_local
+            match_results.append((
+                i_global, int(j),
+                float(chunk_combined[i_local, j]),
+                float(chunk_tfidf[i_local, j]),
+                float(chunk_fuzzy[i_local, j]),
+                float(chunk_gtin[i_local, j])
+            ))
+            if (i_local, j) in chunk_gtin_details:
+                gtin_details[(i_global, int(j))] = chunk_gtin_details[(i_local, j)]
+
+        # Discard chunk matrices immediately
+        del chunk_tfidf, chunk_fuzzy, chunk_size_mat, chunk_gtin, chunk_combined, chunk_gtin_details
+        gc.collect()
+
+    if progress_callback is not None:
+        progress_callback(1.0, n_customers, n_customers)
+
+    print(f"✅ Chunked extraction complete: {len(match_results):,} matches found")
+    # Return sentinel so app.py knows this is streaming results
+    dummy = np.zeros((1, 1))
+    return dummy, dummy, dummy, dummy, gtin_details, match_results
 
 def _calculate_similarity_chunked(customer_texts, catalog_texts, customer_vectors, catalog_vectors,
                                  tfidf_weight, fuzzy_weight, gtin_weight, size_weight,
