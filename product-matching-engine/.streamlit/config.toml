@@ -1,0 +1,21 @@
+[browser]
+serverAddress = "localhost"
+serverPort = 8501
+gatherUsageStats = false
+
+[global]
+developmentMode = false
+disableWatchdogWarning = true
+showWarningOnDirectExecution = false
+# Disable telemetry and email collection
+telemetryOptOut = true
+showErrorDetails = false
+
+[server]
+# Disable file watcher and other interactive features
+fileWatcherType = "none"
+enableCORS = false
+enableXsrfProtection = false
+
+[theme]
+base = "light"
