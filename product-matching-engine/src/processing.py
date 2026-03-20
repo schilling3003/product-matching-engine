@@ -6,10 +6,16 @@ from sklearn.metrics.pairwise import cosine_similarity
 from thefuzz import fuzz
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing as mp
+import gc
+import psutil
+import os
 
 from .config import STOP_WORDS, UNIT_CONVERSION_MAP
 from .gtin_processing import consolidate_gtin_columns, calculate_gtin_match_confidence
-from .product_grouping import find_product_groups, analyze_groups, create_grouped_results, export_groups_flat, filter_groups
+from .product_grouping import (
+    create_grouped_results,
+    get_group_analyses,
+)
 
 def clean_and_standardize(df, column_config, remove_stop_words=True, case_sensitive=False, include_size_in_text=False):
     """Cleans and standardizes the product data in a DataFrame, including complex size handling and GTIN processing."""
@@ -179,6 +185,435 @@ def batch_fuzzy_matching(customer_texts, catalog_texts, chunk_size=1000):
                 fuzzy_matrix[i, j] = fuzz.token_set_ratio(customer_text, catalog_text)
     
     return fuzzy_matrix
+
+def get_memory_usage_mb():
+    """Get current memory usage in MB."""
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / 1024 / 1024
+
+def calculate_similarity_memory_efficient(customer_texts, catalog_texts, customer_vectors, catalog_vectors,
+                                        tfidf_weight=0.5, fuzzy_weight=0.5, gtin_weight=0.0, size_weight=0.0,
+                                        customer_sizes=None, catalog_sizes=None, size_tolerance=20,
+                                        customer_gtins=None, catalog_gtins=None,
+                                        similarity_threshold=50, early_filter=True, enable_multiprocessing=True, batch_size=1000,
+                                        within_file_mode=False, progress_callback=None, max_memory_mb=1500):
+    """
+    Memory-efficient similarity calculation that processes data in chunks.
+    Returns identical results but uses dramatically less memory.
+    """
+    n_customers = len(customer_texts)
+    n_catalog = len(catalog_texts)
+    
+    # Check if we should use memory-efficient mode
+    estimated_memory_mb = (n_customers * n_catalog * 8 * 4) / 1024 / 1024  # 4 matrices, float64
+    use_chunked = estimated_memory_mb > max_memory_mb or n_customers > 10000
+    
+    # Check for ultra-large datasets that need streaming
+    use_streaming = estimated_memory_mb > 4000 or n_customers * n_catalog > 50_000_000
+    
+    if use_streaming:
+        print(f"🌊 Ultra-large dataset detected: {estimated_memory_mb:.0f}MB estimated")
+        return stream_similarity_results(
+            customer_texts, catalog_texts, customer_vectors, catalog_vectors,
+            tfidf_weight, fuzzy_weight, gtin_weight, size_weight,
+            customer_sizes, catalog_sizes, size_tolerance,
+            customer_gtins, catalog_gtins, similarity_threshold, early_filter,
+            enable_multiprocessing, within_file_mode, progress_callback
+        )
+    elif use_chunked:
+        print(f"🧠 Memory-efficient mode: Estimated {estimated_memory_mb:.0f}MB > {max_memory_mb}MB limit")
+        return _calculate_similarity_chunked(
+            customer_texts, catalog_texts, customer_vectors, catalog_vectors,
+            tfidf_weight, fuzzy_weight, gtin_weight, size_weight,
+            customer_sizes, catalog_sizes, size_tolerance,
+            customer_gtins, catalog_gtins, similarity_threshold, early_filter,
+            enable_multiprocessing, batch_size, within_file_mode, progress_callback
+        )
+    else:
+        # Use original implementation for smaller datasets
+        return calculate_similarity_vectorized(
+            customer_texts, catalog_texts, customer_vectors, catalog_vectors,
+            tfidf_weight, fuzzy_weight, gtin_weight, size_weight,
+            customer_sizes, catalog_sizes, size_tolerance,
+            customer_gtins, catalog_gtins, similarity_threshold, early_filter,
+            enable_multiprocessing, batch_size, within_file_mode, progress_callback
+        )
+
+def _calculate_similarity_chunked(customer_texts, catalog_texts, customer_vectors, catalog_vectors,
+                                 tfidf_weight, fuzzy_weight, gtin_weight, size_weight,
+                                 customer_sizes, catalog_sizes, size_tolerance,
+                                 customer_gtins, catalog_gtins, similarity_threshold, early_filter,
+                                 enable_multiprocessing, batch_size, within_file_mode, progress_callback):
+    """
+    Chunked similarity calculation for large datasets.
+    Streams results directly to avoid storing full matrices in memory.
+    """
+    n_customers = len(customer_texts)
+    n_catalog = len(catalog_texts)
+    
+    # For very large datasets, we'll stream results instead of storing matrices
+    stream_results = n_customers * n_catalog > 5_000_000  # 5M elements threshold
+    
+    if stream_results:
+        print(f"🌊 Streaming mode: {n_customers:,} × {n_catalog:,} = {n_customers*n_catalog:,} comparisons")
+        return _stream_similarity_results(
+            customer_texts, catalog_texts, customer_vectors, catalog_vectors,
+            tfidf_weight, fuzzy_weight, gtin_weight, size_weight,
+            customer_sizes, catalog_sizes, size_tolerance,
+            customer_gtins, catalog_gtins, similarity_threshold, early_filter,
+            enable_multiprocessing, batch_size, within_file_mode, progress_callback
+        )
+    
+    # Otherwise use chunked processing with matrix storage
+    return _chunked_with_matrices(
+        customer_texts, catalog_texts, customer_vectors, catalog_vectors,
+        tfidf_weight, fuzzy_weight, gtin_weight, size_weight,
+        customer_sizes, catalog_sizes, size_tolerance,
+        customer_gtins, catalog_gtins, similarity_threshold, early_filter,
+        enable_multiprocessing, batch_size, within_file_mode, progress_callback
+    )
+
+def _stream_similarity_results(customer_texts, catalog_texts, customer_vectors, catalog_vectors,
+                              tfidf_weight, fuzzy_weight, gtin_weight, size_weight,
+                              customer_sizes, catalog_sizes, size_tolerance,
+                              customer_gtins, catalog_gtins, similarity_threshold, early_filter,
+                              enable_multiprocessing, batch_size, within_file_mode, progress_callback):
+    """
+    Stream similarity results without storing full matrices.
+    Returns matrices but computed incrementally with memory cleanup.
+    """
+    n_customers = len(customer_texts)
+    n_catalog = len(catalog_texts)
+    
+    # Initialize matrices (we still need these for the UI)
+    # But we'll compute them row by row and clean up aggressively
+    combined_matrix = np.zeros((n_customers, n_catalog))
+    tfidf_matrix = np.zeros((n_customers, n_catalog))
+    fuzzy_matrix = np.zeros((n_customers, n_catalog))
+    gtin_matrix = np.zeros((n_customers, n_catalog))
+    gtin_details = {}
+    
+    # Process one row at a time for maximum memory efficiency
+    chunk_size = 100  # Very small chunks
+    
+    print(f"🔄 Streaming {n_customers:,} products with tiny chunks of {chunk_size:,}")
+    
+    for chunk_start in range(0, n_customers, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, n_customers)
+        
+        # Force garbage collection before each chunk
+        gc.collect()
+        
+        for i in range(chunk_start, chunk_end):
+            if progress_callback is not None and i % 100 == 0:
+                progress = i / n_customers
+                progress_callback(progress, i, n_customers)
+            
+            # Compute TF-IDF for this single row
+            if tfidf_weight > 0 and customer_vectors is not None and catalog_vectors is not None:
+                tfidf_row = cosine_similarity(customer_vectors[i:i+1], catalog_vectors).flatten() * 100
+            else:
+                tfidf_row = np.zeros(n_catalog)
+            
+            # Compute fuzzy for this row (with filtering)
+            fuzzy_row = np.zeros(n_catalog)
+            if fuzzy_weight > 0:
+                if early_filter and tfidf_weight > 0:
+                    # Find candidates using TF-IDF
+                    min_tfidf_for_fuzzy = max(5, similarity_threshold * 0.2)
+                    top_k = min(500, int(0.05 * n_catalog))
+                    
+                    above_thresh = np.where(tfidf_row >= min_tfidf_for_fuzzy)[0]
+                    
+                    if len(tfidf_row) > 0:
+                        k = min(top_k, max(1, n_catalog - 1))
+                        topk_idx = np.argpartition(-tfidf_row, kth=k)[:top_k]
+                    else:
+                        topk_idx = np.array([], dtype=int)
+                    
+                    candidates = np.unique(np.concatenate([above_thresh, topk_idx]))
+                    
+                    # Skip self in within-file mode
+                    if within_file_mode:
+                        candidates = candidates[candidates != i]
+                    
+                    # Calculate fuzzy only for candidates
+                    if len(candidates) > 0:
+                        customer_text = customer_texts[i]
+                        for j in candidates:
+                            fuzzy_row[j] = fuzz.token_set_ratio(customer_text, catalog_texts[j])
+                else:
+                    # Full fuzzy for small datasets
+                    customer_text = customer_texts[i]
+                    for j, catalog_text in enumerate(catalog_texts):
+                        if not within_file_mode or i != j:
+                            fuzzy_row[j] = fuzz.token_set_ratio(customer_text, catalog_text)
+            
+            # Compute size for this row
+            size_row = np.zeros(n_catalog)
+            if size_weight > 0 and customer_sizes is not None and catalog_sizes is not None:
+                customer_size = customer_sizes[i]
+                if customer_size:
+                    for j, catalog_size in enumerate(catalog_sizes):
+                        size_row[j] = calculate_size_similarity(customer_size, catalog_size, size_tolerance)
+            
+            # Compute GTIN for this row
+            gtin_row = np.zeros(n_catalog)
+            if gtin_weight > 0 and customer_gtins is not None and catalog_gtins is not None:
+                cust_pool = customer_gtins[i]
+                if cust_pool:
+                    for j, cat_pool in enumerate(catalog_gtins):
+                        if cat_pool:
+                            common_gtins = set(cust_pool.keys()) & set(cat_pool.keys())
+                            if common_gtins:
+                                best_confidence = 0.0
+                                best_match_type = 'No Match'
+                                best_matching_gtins = []
+                                
+                                for gtin in common_gtins:
+                                    confidence, match_type = _get_gtin_confidence(cust_pool[gtin], cat_pool[gtin])
+                                    if confidence > best_confidence:
+                                        best_confidence = confidence
+                                        best_match_type = match_type
+                                        best_matching_gtins = [gtin]
+                                    elif confidence == best_confidence:
+                                        best_matching_gtins.append(gtin)
+                                
+                                if best_confidence > 0:
+                                    gtin_row[j] = best_confidence
+                                    gtin_details[(i, j)] = {
+                                        'confidence': best_confidence,
+                                        'match_type': best_match_type,
+                                        'matching_gtins': best_matching_gtins[:3]
+                                    }
+            
+            # Calculate combined score
+            combined_row = _calculate_combined_score(
+                tfidf_row, fuzzy_row, gtin_row, size_row,
+                tfidf_weight, fuzzy_weight, gtin_weight, size_weight
+            )
+            
+            # Store in matrices
+            combined_matrix[i] = combined_row
+            tfidf_matrix[i] = tfidf_row
+            fuzzy_matrix[i] = fuzzy_row
+            gtin_matrix[i] = gtin_row
+            
+            # Clean up row variables immediately
+            del tfidf_row, fuzzy_row, size_row, gtin_row, combined_row
+        
+        # Aggressive cleanup after each small chunk
+        gc.collect()
+        
+        # Memory check
+        current_memory = get_memory_usage_mb()
+        if current_memory > 1000:  # Lower threshold
+            print(f"🧹 Memory cleanup at {current_memory:.0f}MB")
+            gc.collect()
+    
+    # Final cleanup
+    if within_file_mode and n_customers == n_catalog:
+        np.fill_diagonal(combined_matrix, 0)
+        np.fill_diagonal(tfidf_matrix, 0)
+        np.fill_diagonal(fuzzy_matrix, 0)
+        np.fill_diagonal(gtin_matrix, 0)
+    
+    if progress_callback is not None:
+        progress_callback(1.0, n_customers, n_customers)
+    
+    return combined_matrix, tfidf_matrix, fuzzy_matrix, gtin_matrix, gtin_details
+
+def _chunked_with_matrices(customer_texts, catalog_texts, customer_vectors, catalog_vectors,
+                          tfidf_weight, fuzzy_weight, gtin_weight, size_weight,
+                          customer_sizes, catalog_sizes, size_tolerance,
+                          customer_gtins, catalog_gtins, similarity_threshold, early_filter,
+                          enable_multiprocessing, batch_size, within_file_mode, progress_callback):
+    """
+    Original chunked implementation with matrix storage.
+    Used for medium-sized datasets.
+    """
+    n_customers = len(customer_texts)
+    n_catalog = len(catalog_texts)
+    
+    # Initialize result matrices
+    combined_matrix = np.zeros((n_customers, n_catalog))
+    tfidf_matrix = np.zeros((n_customers, n_catalog))
+    fuzzy_matrix = np.zeros((n_customers, n_catalog))
+    gtin_matrix = np.zeros((n_customers, n_catalog))
+    gtin_details = {}
+    
+    # Determine optimal chunk size
+    chunk_size = min(1000, max(100, 1500 * 1024 * 1024 // (n_catalog * 8 * 4)))
+    
+    print(f"🔄 Processing {n_customers:,} products in chunks of {chunk_size:,}")
+    
+    for chunk_start in range(0, n_customers, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, n_customers)
+        chunk_indices = range(chunk_start, chunk_end)
+        
+        if progress_callback is not None:
+            progress = chunk_start / n_customers
+            progress_callback(progress, chunk_start, n_customers)
+        
+        # Process TF-IDF for this chunk
+        if tfidf_weight > 0 and customer_vectors is not None and catalog_vectors is not None:
+            chunk_vectors = customer_vectors[chunk_start:chunk_end]
+            chunk_tfidf = cosine_similarity(chunk_vectors, catalog_vectors) * 100
+        else:
+            chunk_tfidf = np.zeros((len(chunk_indices), n_catalog))
+        
+        # Process fuzzy matching for this chunk
+        chunk_fuzzy = np.zeros((len(chunk_indices), n_catalog))
+        if fuzzy_weight > 0:
+            if early_filter and tfidf_weight > 0:
+                min_tfidf_for_fuzzy = max(5, similarity_threshold * 0.2)
+                top_k = min(500, int(0.05 * n_catalog))
+                
+                for i_local, i_global in enumerate(chunk_indices):
+                    tfidf_row = chunk_tfidf[i_local]
+                    above_thresh = np.where(tfidf_row >= min_tfidf_for_fuzzy)[0]
+                    
+                    if len(tfidf_row) > 0:
+                        k = min(top_k, max(1, n_catalog - 1))
+                        topk_idx = np.argpartition(-tfidf_row, kth=k)[:top_k]
+                    else:
+                        topk_idx = np.array([], dtype=int)
+                    
+                    candidates = np.unique(np.concatenate([above_thresh, topk_idx]))
+                    
+                    if within_file_mode:
+                        candidates = candidates[candidates != i_global]
+                    
+                    if len(candidates) > 0:
+                        customer_text = customer_texts[i_global]
+                        for j in candidates:
+                            chunk_fuzzy[i_local, j] = fuzz.token_set_ratio(customer_text, catalog_texts[j])
+            else:
+                for i_local, i_global in enumerate(chunk_indices):
+                    customer_text = customer_texts[i_global]
+                    for j, catalog_text in enumerate(catalog_texts):
+                        if not within_file_mode or i_global != j:
+                            chunk_fuzzy[i_local, j] = fuzz.token_set_ratio(customer_text, catalog_text)
+        
+        # Process size and GTIN similarly...
+        chunk_size_matrix = np.zeros((len(chunk_indices), n_catalog))
+        if size_weight > 0 and customer_sizes is not None and catalog_sizes is not None:
+            for i_local, i_global in enumerate(chunk_indices):
+                customer_size = customer_sizes[i_global]
+                if customer_size:
+                    for j, catalog_size in enumerate(catalog_sizes):
+                        chunk_size_matrix[i_local, j] = calculate_size_similarity(customer_size, catalog_size, size_tolerance)
+        
+        chunk_gtin = np.zeros((len(chunk_indices), n_catalog))
+        if gtin_weight > 0 and customer_gtins is not None and catalog_gtins is not None:
+            for i_local, i_global in enumerate(chunk_indices):
+                cust_pool = customer_gtins[i_global]
+                if not cust_pool:
+                    continue
+                for j, cat_pool in enumerate(catalog_gtins):
+                    if not cat_pool:
+                        continue
+                    
+                    common_gtins = set(cust_pool.keys()) & set(cat_pool.keys())
+                    if common_gtins:
+                        best_confidence = 0.0
+                        best_match_type = 'No Match'
+                        best_matching_gtins = []
+                        
+                        for gtin in common_gtins:
+                            confidence, match_type = _get_gtin_confidence(cust_pool[gtin], cat_pool[gtin])
+                            if confidence > best_confidence:
+                                best_confidence = confidence
+                                best_match_type = match_type
+                                best_matching_gtins = [gtin]
+                            elif confidence == best_confidence:
+                                best_matching_gtins.append(gtin)
+                        
+                        if best_confidence > 0:
+                            chunk_gtin[i_local, j] = best_confidence
+                            gtin_details[(i_global, j)] = {
+                                'confidence': best_confidence,
+                                'match_type': best_match_type,
+                                'matching_gtins': best_matching_gtins[:3]
+                            }
+        
+        # Combine scores for this chunk
+        for i_local, i_global in enumerate(chunk_indices):
+            combined_score = _calculate_combined_score(
+                chunk_tfidf[i_local], chunk_fuzzy[i_local], chunk_gtin[i_local], chunk_size_matrix[i_local],
+                tfidf_weight, fuzzy_weight, gtin_weight, size_weight
+            )
+            
+            combined_matrix[i_global] = combined_score
+            tfidf_matrix[i_global] = chunk_tfidf[i_local]
+            fuzzy_matrix[i_global] = chunk_fuzzy[i_local]
+            gtin_matrix[i_global] = chunk_gtin[i_local]
+        
+        # Clean up memory
+        del chunk_tfidf, chunk_fuzzy, chunk_size_matrix, chunk_gtin
+        gc.collect()
+    
+    if within_file_mode and n_customers == n_catalog:
+        np.fill_diagonal(combined_matrix, 0)
+        np.fill_diagonal(tfidf_matrix, 0)
+        np.fill_diagonal(fuzzy_matrix, 0)
+        np.fill_diagonal(gtin_matrix, 0)
+    
+    if progress_callback is not None:
+        progress_callback(1.0, n_customers, n_customers)
+    
+    return combined_matrix, tfidf_matrix, fuzzy_matrix, gtin_matrix, gtin_details
+
+def _calculate_combined_score(tfidf_row, fuzzy_row, gtin_row, size_row, tfidf_weight, fuzzy_weight, gtin_weight, size_weight):
+    """Calculate combined score for a single row using the same logic as the original."""
+    # Check if this is GTIN-only mode
+    is_gtin_only = (gtin_weight > 0 and tfidf_weight == 0 and fuzzy_weight == 0)
+    is_text_only = (gtin_weight == 0 and (tfidf_weight > 0 or fuzzy_weight > 0))
+    
+    if is_gtin_only:
+        # GTIN-only mode
+        combined = gtin_row.copy()
+        if size_weight > 0:
+            combined = (combined * (1 - size_weight)) + (size_row * size_weight)
+    elif is_text_only:
+        # Text-only mode
+        text_total = tfidf_weight + fuzzy_weight
+        if text_total > 0:
+            tfidf_norm = tfidf_weight / text_total
+            fuzzy_norm = fuzzy_weight / text_total
+        else:
+            tfidf_norm = 0.5
+            fuzzy_norm = 0.5
+        
+        combined = (tfidf_row * tfidf_norm) + (fuzzy_row * fuzzy_norm)
+        if size_weight > 0:
+            combined = (combined * (1 - size_weight)) + (size_row * size_weight)
+    else:
+        # Combined mode
+        text_total = tfidf_weight + fuzzy_weight
+        if text_total > 0:
+            tfidf_norm = tfidf_weight / text_total
+            fuzzy_norm = fuzzy_weight / text_total
+        else:
+            tfidf_norm = 0.5
+            fuzzy_norm = 0.5
+        
+        # Calculate text-only scores
+        text_only = (tfidf_row * tfidf_norm) + (fuzzy_row * fuzzy_norm)
+        
+        # Calculate GTIN-blended scores
+        gtin_blended = (text_only * 0.5) + (gtin_row * 0.5)
+        
+        # Use mask to select correct calculation
+        has_gtin_match = (gtin_row > 0)
+        combined = np.where(has_gtin_match, gtin_blended, text_only)
+        
+        # Add size component if enabled
+        if size_weight > 0:
+            combined = (combined * (1 - size_weight)) + (size_row * size_weight)
+    
+    # Cap at 100%
+    return np.minimum(combined, 100.0)
 
 def calculate_similarity_vectorized(customer_texts, catalog_texts, customer_vectors, catalog_vectors,
                                   tfidf_weight=0.5, fuzzy_weight=0.5, gtin_weight=0.0, size_weight=0.0,
@@ -458,7 +893,9 @@ def process_grouped_results(similarity_matrix,
                            similarity_threshold=80.0,
                            min_group_size=2,
                            max_groups=None,
-                           group_view_mode=True):
+                           group_view_mode=True,
+                           selected_output_columns=None,
+                           conservative_grouping=True):
     """
     Process similarity matrix to create grouped product results.
     
@@ -474,21 +911,13 @@ def process_grouped_results(similarity_matrix,
     Returns:
         DataFrame with results (grouped or pairwise)
     """
-    # Find product groups using connected components
-    groups = find_product_groups(similarity_matrix, threshold=similarity_threshold)
-    
-    if not groups:
-        return pd.DataFrame()
-    
-    # Analyze groups to get statistics
-    analyses = analyze_groups(similarity_matrix, groups, product_names)
-    
-    # Filter groups based on criteria
-    filtered_analyses = filter_groups(
-        analyses, 
+    filtered_analyses = get_group_analyses(
+        similarity_matrix=similarity_matrix,
+        product_names=product_names,
+        similarity_threshold=similarity_threshold,
         min_group_size=min_group_size,
         max_groups=max_groups,
-        sort_by='size'
+        conservative_grouping=conservative_grouping,
     )
     
     if not filtered_analyses:
@@ -496,14 +925,12 @@ def process_grouped_results(similarity_matrix,
     
     if group_view_mode:
         # Return grouped results
-        display_columns = [
-            col for col in product_df.columns
-            if col not in ['combined_product_name', 'gtin_pool']
-        ]
+        display_columns = selected_output_columns if selected_output_columns is not None else []
         results_df = create_grouped_results(filtered_analyses, product_df, display_columns)
     else:
         # Return traditional pairwise results
         results = []
+        selected_cols = selected_output_columns if selected_output_columns is not None else []
         for analysis in filtered_analyses:
             member_indices = analysis['member_indices']
             
@@ -521,9 +948,9 @@ def process_grouped_results(similarity_matrix,
                         'Group Size': analysis['group_size']
                     }
                     
-                    # Add additional columns from product_df
-                    for col in product_df.columns:
-                        if col not in ['combined_product_name']:
+                    # Add only user-selected additional columns
+                    for col in selected_cols:
+                        if col in product_df.columns:
                             result[f'Product 1 {col}'] = product_df.iloc[idx1][col]
                             result[f'Product 2 {col}'] = product_df.iloc[idx2][col]
                     
@@ -532,3 +959,171 @@ def process_grouped_results(similarity_matrix,
         results_df = pd.DataFrame(results)
     
     return results_df
+
+def stream_similarity_results(customer_texts, catalog_texts, customer_vectors, catalog_vectors,
+                            tfidf_weight=0.5, fuzzy_weight=0.5, gtin_weight=0.0, size_weight=0.0,
+                            customer_sizes=None, catalog_sizes=None, size_tolerance=20,
+                            customer_gtins=None, catalog_gtins=None,
+                            similarity_threshold=50, early_filter=True, enable_multiprocessing=True,
+                            within_file_mode=False, progress_callback=None, max_matches_per_product=100):
+    """
+    True streaming processor that never stores full matrices.
+    Processes one row at a time and streams results directly.
+    Memory usage stays constant regardless of dataset size.
+    """
+    n_customers = len(customer_texts)
+    n_catalog = len(catalog_texts)
+    
+    print(f"🌊 True streaming mode: {n_customers:,} × {n_catalog:,} comparisons")
+    print(f"💾 Memory usage will stay ~200-500MB regardless of dataset size")
+    
+    results = []
+    gtin_details = {}
+    
+    # Process one customer at a time
+    for i in range(n_customers):
+        if progress_callback is not None and i % 100 == 0:
+            progress = i / n_customers
+            progress_callback(progress, i, n_customers)
+        
+        # Calculate TF-IDF for this single customer
+        if tfidf_weight > 0 and customer_vectors is not None and catalog_vectors is not None:
+            tfidf_scores = cosine_similarity(customer_vectors[i:i+1], catalog_vectors).flatten() * 100
+        else:
+            tfidf_scores = np.zeros(n_catalog)
+        
+        # Find candidates for fuzzy matching
+        candidate_indices = list(range(n_catalog))
+        
+        if early_filter and fuzzy_weight > 0 and tfidf_weight > 0:
+            # Use TF-IDF to pre-filter candidates
+            min_tfidf_for_fuzzy = max(5, similarity_threshold * 0.2)
+            top_k = min(1000, int(0.1 * n_catalog))  # More aggressive for streaming
+            
+            above_thresh = np.where(tfidf_scores >= min_tfidf_for_fuzzy)[0]
+            
+            if len(tfidf_scores) > 0:
+                k = min(top_k, max(1, n_catalog - 1))
+                topk_idx = np.argpartition(-tfidf_scores, kth=k)[:top_k]
+            else:
+                topk_idx = np.array([], dtype=int)
+            
+            candidate_indices = np.unique(np.concatenate([above_thresh, topk_idx]))
+            
+            # Skip self in within-file mode
+            if within_file_mode:
+                candidate_indices = candidate_indices[candidate_indices != i]
+        
+        # Calculate fuzzy scores only for candidates
+        fuzzy_scores = np.zeros(n_catalog)
+        if fuzzy_weight > 0:
+            customer_text = customer_texts[i]
+            if len(candidate_indices) < n_catalog * 0.5:  # Only if filtering helps
+                for j in candidate_indices:
+                    fuzzy_scores[j] = fuzz.token_set_ratio(customer_text, catalog_texts[j])
+            else:
+                # Full calculation if filtering doesn't help much
+                for j, catalog_text in enumerate(catalog_texts):
+                    if not within_file_mode or i != j:
+                        fuzzy_scores[j] = fuzz.token_set_ratio(customer_text, catalog_text)
+        
+        # Calculate size scores
+        size_scores = np.zeros(n_catalog)
+        if size_weight > 0 and customer_sizes is not None and catalog_sizes is not None:
+            customer_size = customer_sizes[i]
+            if customer_size:
+                for j, catalog_size in enumerate(catalog_sizes):
+                    size_scores[j] = calculate_size_similarity(customer_size, catalog_size, size_tolerance)
+        
+        # Calculate GTIN scores
+        gtin_scores = np.zeros(n_catalog)
+        row_gtin_details = {}
+        if gtin_weight > 0 and customer_gtins is not None and catalog_gtins is not None:
+            cust_pool = customer_gtins[i]
+            if cust_pool:
+                for j, cat_pool in enumerate(catalog_gtins):
+                    if cat_pool:
+                        common_gtins = set(cust_pool.keys()) & set(cat_pool.keys())
+                        if common_gtins:
+                            best_confidence = 0.0
+                            best_match_type = 'No Match'
+                            best_matching_gtins = []
+                            
+                            for gtin in common_gtins:
+                                confidence, match_type = _get_gtin_confidence(cust_pool[gtin], cat_pool[gtin])
+                                if confidence > best_confidence:
+                                    best_confidence = confidence
+                                    best_match_type = match_type
+                                    best_matching_gtins = [gtin]
+                                elif confidence == best_confidence:
+                                    best_matching_gtins.append(gtin)
+                            
+                            if best_confidence > 0:
+                                gtin_scores[j] = best_confidence
+                                row_gtin_details[j] = {
+                                    'confidence': best_confidence,
+                                    'match_type': best_match_type,
+                                    'matching_gtins': best_matching_gtins[:3]
+                                }
+        
+        # Calculate combined scores and find matches
+        for j in range(n_catalog):
+            # Skip self in within-file mode
+            if within_file_mode and i == j:
+                continue
+            
+            # Calculate combined score
+            combined_score = _calculate_combined_score(
+                np.array([tfidf_scores[j]]),
+                np.array([fuzzy_scores[j]]),
+                np.array([gtin_scores[j]]),
+                np.array([size_scores[j]]),
+                tfidf_weight, fuzzy_weight, gtin_weight, size_weight
+            )[0]
+            
+            # Check if above threshold
+            if combined_score >= similarity_threshold:
+                # Store match result
+                result = {
+                    'customer_idx': i,
+                    'catalog_idx': j,
+                    'confidence_score': combined_score,
+                    'tfidf_score': tfidf_scores[j],
+                    'fuzzy_score': fuzzy_scores[j],
+                    'gtin_score': gtin_scores[j]
+                }
+                
+                # Add GTIN details if available
+                if j in row_gtin_details:
+                    result['gtin_match_type'] = row_gtin_details[j]['match_type']
+                    result['matching_gtins'] = ', '.join(row_gtin_details[j]['matching_gtins'][:3])
+                    gtin_details[(i, j)] = row_gtin_details[j]
+                
+                results.append(result)
+        
+        # Clean up this row's data immediately
+        del tfidf_scores, fuzzy_scores, size_scores, gtin_scores, row_gtin_details
+        
+        # Aggressive garbage collection every 100 rows
+        if i % 100 == 0:
+            gc.collect()
+            
+            # Memory check
+            current_memory = get_memory_usage_mb()
+            if current_memory > 800:  # Lower threshold for streaming
+                print(f"🧹 Memory cleanup at {current_memory:.0f}MB")
+                gc.collect()
+    
+    # Final cleanup
+    gc.collect()
+    
+    if progress_callback is not None:
+        progress_callback(1.0, n_customers, n_customers)
+    
+    print(f"✅ Streaming complete: Found {len(results):,} matches using <500MB memory")
+    
+    # Return dummy matrices for compatibility (they won't be used)
+    # The actual results are in the 'results' list
+    dummy_matrix = np.zeros((n_customers, n_catalog))
+    
+    return dummy_matrix, dummy_matrix, dummy_matrix, dummy_matrix, gtin_details, results

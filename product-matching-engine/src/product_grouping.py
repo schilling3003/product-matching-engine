@@ -122,9 +122,11 @@ def _find_groups_networkx(similarity_matrix: np.ndarray, threshold: float) -> Li
     return result
 
 
-def analyze_groups(similarity_matrix: np.ndarray, 
+def analyze_groups(similarity_matrix: np.ndarray,
                   groups: List[List[int]],
-                  product_names: List[str] = None) -> List[Dict[str, Any]]:
+                  product_names: List[str] = None,
+                  threshold: float = None,
+                  conservative: bool = False) -> List[Dict[str, Any]]:
     """
     Analyze product groups to calculate statistics and find representatives.
     
@@ -137,6 +139,9 @@ def analyze_groups(similarity_matrix: np.ndarray,
         List of group analysis dictionaries
     """
     analyses = []
+
+    if conservative and threshold is not None:
+        groups = _conservative_split_groups(similarity_matrix, groups, threshold)
     
     for group_idx, group in enumerate(groups):
         group_size = len(group)
@@ -173,6 +178,43 @@ def analyze_groups(similarity_matrix: np.ndarray,
         analyses.append(analysis)
     
     return analyses
+
+
+def _conservative_split_groups(similarity_matrix: np.ndarray,
+                               groups: List[List[int]],
+                               threshold: float) -> List[List[int]]:
+    """Split connected components conservatively using representative affinity."""
+    refined_groups = []
+
+    for group in groups:
+        if len(group) <= 2:
+            refined_groups.append(group)
+            continue
+
+        remaining = set(group)
+        while remaining:
+            if len(remaining) == 1:
+                break
+
+            candidates = list(remaining)
+            rep_idx = max(
+                candidates,
+                key=lambda i: np.mean([
+                    similarity_matrix[i][j] for j in candidates if j != i
+                ]) if len(candidates) > 1 else 0,
+            )
+
+            cluster = [
+                idx for idx in candidates
+                if idx == rep_idx or similarity_matrix[rep_idx][idx] >= threshold
+            ]
+
+            if len(cluster) > 1:
+                refined_groups.append(sorted(cluster))
+
+            remaining -= set(cluster)
+
+    return refined_groups
 
 
 def _find_representative(similarity_matrix: np.ndarray, group: List[int]) -> int:
@@ -218,46 +260,26 @@ def create_grouped_results(analyses: List[Dict[str, Any]],
     for analysis in analyses:
         group_id = analysis['group_id']
         member_indices = analysis['member_indices']
-        
-        # Add summary row for the group
-        summary = {
-            'Group ID': group_id,
-            'Product Name': f"[Group Summary] {analysis.get('representative_name', 'Representative')}",
-            'Role': 'Representative',
-            'Group Size': analysis['group_size'],
-            'Avg Similarity': f"{analysis['avg_similarity']:.2f}%",
-            'Min Similarity': f"{analysis['min_similarity']:.2f}%"
-        }
-        
-        # Add additional columns if specified
-        if display_columns:
-            rep_idx = analysis['representative_idx']
-            for col in display_columns:
-                if col in product_data.columns:
-                    summary[col] = _to_serializable_scalar(product_data.iloc[rep_idx][col])
-        
-        results.append(summary)
-        
-        # Add member details
+        representative_idx = analysis['representative_idx']
+        representative_name = analysis.get('representative_name', str(representative_idx))
+
         for i, member_idx in enumerate(member_indices):
-            if member_idx == analysis['representative_idx']:
-                continue  # Skip representative as it's already shown
-                
+            member_name = analysis.get('member_names', [str(idx) for idx in member_indices])[i]
             member_info = {
                 'Group ID': group_id,
-                'Product Name': analysis.get('member_names', [str(member_idx)])[i],
-                'Role': 'Member',
+                'Group Summary': representative_name,
+                'Product Name': member_name,
+                'Is Representative': member_idx == representative_idx,
                 'Group Size': analysis['group_size'],
-                'Avg Similarity': None,
-                'Min Similarity': None
+                'Group Avg Similarity': round(float(analysis['avg_similarity']), 2),
+                'Group Min Similarity': round(float(analysis['min_similarity']), 2),
             }
-            
-            # Add additional columns if specified
+
             if display_columns:
                 for col in display_columns:
                     if col in product_data.columns:
                         member_info[col] = _to_serializable_scalar(product_data.iloc[member_idx][col])
-            
+
             results.append(member_info)
     
     return pd.DataFrame(results)
@@ -283,13 +305,17 @@ def export_groups_flat(analyses: List[Dict[str, Any]],
         group_id = analysis['group_id']
         member_indices = analysis['member_indices']
         
+        representative_name = analysis.get('representative_name', str(analysis['representative_idx']))
+
         for i, member_idx in enumerate(member_indices):
             row = {
                 'Group ID': group_id,
+                'Group Summary': representative_name,
                 'Product Name': analysis.get('member_names', [str(member_idx)])[i],
                 'Is Representative': member_idx == analysis['representative_idx'],
                 'Group Size': analysis['group_size'],
-                'Group Avg Similarity': f"{analysis['avg_similarity']:.2f}%"
+                'Group Avg Similarity': round(float(analysis['avg_similarity']), 2),
+                'Group Min Similarity': round(float(analysis['min_similarity']), 2),
             }
             
             # Add additional columns if specified
@@ -335,3 +361,30 @@ def filter_groups(analyses: List[Dict[str, Any]],
         filtered = filtered[:max_groups]
     
     return filtered
+
+
+def get_group_analyses(similarity_matrix: np.ndarray,
+                      product_names: List[str],
+                      similarity_threshold: float,
+                      min_group_size: int = 2,
+                      max_groups: int = None,
+                      conservative_grouping: bool = True) -> List[Dict[str, Any]]:
+    """Build filtered group analyses from a similarity matrix using consistent settings."""
+    groups = find_product_groups(similarity_matrix, threshold=similarity_threshold)
+    if not groups:
+        return []
+
+    analyses = analyze_groups(
+        similarity_matrix,
+        groups,
+        product_names,
+        threshold=similarity_threshold,
+        conservative=conservative_grouping,
+    )
+
+    return filter_groups(
+        analyses,
+        min_group_size=min_group_size,
+        max_groups=max_groups,
+        sort_by='size',
+    )

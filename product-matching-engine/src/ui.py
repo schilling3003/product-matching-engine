@@ -42,7 +42,7 @@ def setup_sidebar():
                     "Maximum groups to show",
                     [10, 25, 50, 100, "All"],
                     index=2,
-                    help="Limit the number of groups shown for performance."
+                    help="Limits the number of groups returned (ranked by group size). This does not cap members per group."
                 )
                 
                 if max_groups == "All":
@@ -55,15 +55,33 @@ def setup_sidebar():
                     ["Summary with Details", "Pairwise within Groups"],
                     help="Summary with Details: Shows representative products with expandable details\nPairwise within Groups: Shows all pairwise matches within each group"
                 )
+
+                enable_threshold_explorer = st.checkbox(
+                    "Enable threshold explorer",
+                    value=False,
+                    help="Analyze how grouping changes across similarity thresholds without rerunning full preprocessing."
+                )
+                threshold_range = st.slider(
+                    "Threshold explorer range",
+                    min_value=40,
+                    max_value=95,
+                    value=(50, 80),
+                    step=5,
+                    disabled=not enable_threshold_explorer,
+                )
             else:
                 min_group_size = 2
                 max_groups = None
                 view_mode = "Pairwise within Groups"
+                enable_threshold_explorer = False
+                threshold_range = (50, 80)
         else:
             group_results = False
             min_group_size = 2
             max_groups = None
             view_mode = "Pairwise within Groups"
+            enable_threshold_explorer = False
+            threshold_range = (50, 80)
         
         # === SIMPLE SETTINGS FOR EVERYONE ===
         st.subheader("🎯 Basic Settings")
@@ -398,6 +416,8 @@ def setup_sidebar():
         'min_group_size': min_group_size,
         'max_groups': max_groups,
         'view_mode': view_mode,
+        'enable_threshold_explorer': enable_threshold_explorer,
+        'threshold_range': threshold_range,
         'similarity_threshold': similarity_threshold,
         'enable_text_matching': enable_text_matching,
         'enable_gtin_matching': enable_gtin_matching,
