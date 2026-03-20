@@ -8,6 +8,7 @@ from io import BytesIO
 from src.ui import setup_sidebar, setup_column_selection
 from src.processing import clean_and_standardize, calculate_similarity_memory_efficient, process_grouped_results
 from src.gtin_processing import generate_gtin_quality_report
+from src.threshold_explorer import compute_threshold_explorer, build_threshold_workbook
 
 
 def _sanitize_for_streamlit(df: pd.DataFrame) -> pd.DataFrame:
@@ -226,6 +227,7 @@ def main():
                     results_df = pd.DataFrame()
                     selected_group_output_cols = column_config['customer'].get('output_cols', [])
                     use_grouping = is_within_file and settings.get('group_results', False)
+                    product_names = cleaned_customer_df[column_config['customer']['product_cols'][0]].tolist()
                     
                     # Check if we have streaming results
                     if streaming_results is not None:
