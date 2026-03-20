@@ -206,7 +206,12 @@ def setup_sidebar():
         
         methods_desc = " + ".join(methods) if methods else "no methods selected"
         
-        st.info(f"🍽️ **Setup:** {strictness.lower()} ({threshold_desc}) • {methods_desc} • up to {max_matches_per_product} matches per product")
+        if matching_mode == "Find Similar Within File" and group_results:
+            result_scope_desc = f"up to {max_groups if max_groups is not None else 'all'} groups"
+        else:
+            result_scope_desc = f"up to {max_matches_per_product} matches per product"
+
+        st.info(f"🍽️ **Setup:** {strictness.lower()} ({threshold_desc}) • {methods_desc} • {result_scope_desc}")
         
         # Method-specific tips
         if enable_text_matching and enable_gtin_matching:

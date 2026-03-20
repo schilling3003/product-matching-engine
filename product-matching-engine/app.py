@@ -56,6 +56,9 @@ def main():
                                                                 settings['remove_stop_words'], settings['case_sensitive'], 
                                                                 settings['include_size_in_text'])
 
+                    # Mode flags used throughout processing
+                    is_within_file = settings['matching_mode'] == "Find Similar Within File"
+
                     # --- Vectorization (only if text matching is enabled) ---
                     if settings['enable_text_matching']:
                         vectorizer = TfidfVectorizer(stop_words='english' if settings['remove_stop_words'] else None)
@@ -69,10 +72,23 @@ def main():
                         customer_vectors = None
 
                     # --- Similarity Calculation ---
-                    # Show status for similarity calculation
+                    # Show status for similarity calculation on large within-file jobs
+                    status_placeholder = None
+                    similarity_progress_bar = None
+                    similarity_status_text = None
+                    progress_callback = None
                     if is_within_file and len(cleaned_customer_df) > 10000:
                         status_placeholder = st.empty()
                         status_placeholder.text("🔄 Calculating similarity matrix...")
+                        similarity_progress_bar = st.progress(0, text="Calculating similarity matrix...")
+                        similarity_status_text = st.empty()
+
+                        def progress_callback(progress, current, total):
+                            similarity_progress_bar.progress(
+                                progress,
+                                text=f"Calculating similarity matrix... {current:,} of {total:,}"
+                            )
+                            similarity_status_text.text(f"Processed {current:,} of {total:,} products")
                     
                     combined_matrix, tfidf_matrix, fuzzy_matrix, gtin_matrix, gtin_details = calculate_similarity_vectorized(
                         customer_texts=cleaned_customer_df['combined_product_name'].fillna('').tolist(),
@@ -92,16 +108,21 @@ def main():
                         early_filter=settings['enable_early_filtering'],
                         enable_multiprocessing=settings['enable_multiprocessing'],
                         batch_size=settings['batch_size'],
-                        within_file_mode=(settings['matching_mode'] == "Find Similar Within File")
+                        within_file_mode=(settings['matching_mode'] == "Find Similar Within File"),
+                        progress_callback=progress_callback
                     )
                     
                     # Clear similarity calculation status
-                    if is_within_file and len(cleaned_customer_df) > 10000:
+                    if status_placeholder is not None:
                         status_placeholder.empty()
+                    if similarity_progress_bar is not None:
+                        similarity_progress_bar.progress(1.0, text="Similarity calculation complete!")
+                    if similarity_status_text is not None:
+                        similarity_status_text.text("✅ Similarity calculation complete!")
 
                     # --- Results Processing ---
                     results = []
-                    is_within_file = settings['matching_mode'] == "Find Similar Within File"
+                    results_df = pd.DataFrame()
                     
                     # Check if we should use grouping (only for within-file mode)
                     use_grouping = is_within_file and settings.get('group_results', False)
@@ -304,14 +325,15 @@ def main():
                         # --- Display Stats ---
                         st.subheader("📊 Match Summary")
                         total_products = len(cleaned_customer_df)
+                        col1, col2, col3, col4 = st.columns(4)
                         
                         if use_grouping:
                             # For grouped results, count groups and members
-                            if 'Group ID' in results_df.columns:
+                            if {'Group ID', 'Role'}.issubset(results_df.columns):
                                 # Count unique groups
                                 unique_groups = results_df['Group ID'].nunique()
                                 # Count products in groups (exclude summary rows)
-                                products_in_groups = len(results_df[results_df['Role'] == 'Member']) + len(results_df[results_df['Role'] == 'Representative'])
+                                products_in_groups = len(results_df[results_df['Role'].isin(['Member', 'Representative'])])
                                 # Calculate average confidence from numeric columns
                                 if 'Confidence Score' in results_df.columns:
                                     confidence_scores = pd.to_numeric(results_df['Confidence Score'].str.replace('%', ''), errors='coerce')
@@ -327,7 +349,7 @@ def main():
                                 col2.metric("Groups Found", f"{unique_groups}")
                                 col3.metric("Products in Groups", f"{products_in_groups}")
                                 col4.metric("Avg. Similarity", f"{avg_confidence:.2f}%")
-                            else:
+                            elif 'Group ID' in results_df.columns and 'Confidence Score' in results_df.columns:
                                 # Pairwise within groups
                                 total_matches = len(results_df)
                                 avg_confidence = pd.to_numeric(results_df['Confidence Score'].str.replace('%', '')).mean()

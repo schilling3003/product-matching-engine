@@ -185,7 +185,7 @@ def calculate_similarity_vectorized(customer_texts, catalog_texts, customer_vect
                                   customer_sizes=None, catalog_sizes=None, size_tolerance=20,
                                   customer_gtins=None, catalog_gtins=None,
                                   similarity_threshold=50, early_filter=True, enable_multiprocessing=True, batch_size=1000,
-                                  within_file_mode=False):
+                                  within_file_mode=False, progress_callback=None):
     """
     Vectorized similarity calculation that processes all comparisons at once.
     Much faster than row-by-row processing. Now includes GTIN matching capability.
@@ -223,6 +223,8 @@ def calculate_similarity_vectorized(customer_texts, catalog_texts, customer_vect
                 for i in range(n_customers):
                     if i % 1000 == 0:
                         print(f"Processing product {i:,} of {n_customers:,}")
+                        if progress_callback is not None:
+                            progress_callback((i + 1) / n_customers, i + 1, n_customers)
                     
                     tfidf_row = tfidf_matrix[i]
                     # Much stricter filtering for large datasets
@@ -247,6 +249,9 @@ def calculate_similarity_vectorized(customer_texts, catalog_texts, customer_vect
                     cust_text = customer_texts[i]
                     for j in cand_idx:
                         fuzzy_matrix[i, j] = fuzz.token_set_ratio(cust_text, catalog_texts[j])
+
+                if progress_callback is not None:
+                    progress_callback(1.0, n_customers, n_customers)
             # If catalog is moderate size, compute full fuzzy for maximal recall
             elif n_customers * n_catalog <= 5_000_000 or n_catalog <= 5000:
                 if enable_multiprocessing and n_customers * n_catalog > 10000:
