@@ -189,7 +189,6 @@ def main():
                             progress_bar.progress(1.0, text="Processing complete!")
                             status_text.text("✅ Processing complete!")
                             # Clear the status text after a moment
-                            import time
                             time.sleep(0.5)
                             status_text.empty()
                         else:
