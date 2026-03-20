@@ -9,6 +9,17 @@ from src.ui import setup_sidebar, setup_column_selection
 from src.processing import clean_and_standardize, calculate_similarity_vectorized, process_grouped_results
 from src.gtin_processing import generate_gtin_quality_report
 
+
+def _sanitize_for_streamlit(df: pd.DataFrame) -> pd.DataFrame:
+    """Return an Arrow-safe DataFrame for Streamlit display/export."""
+    safe_df = df.copy()
+    for col in safe_df.columns:
+        if safe_df[col].dtype == "object":
+            safe_df[col] = safe_df[col].apply(
+                lambda x: str(x) if isinstance(x, (dict, list, set, tuple)) else x
+            )
+    return safe_df
+
 def main():
     """
     Main function to run the Streamlit application.
@@ -322,6 +333,7 @@ def main():
                                         st.metric("Invalid GTINs", customer_report['invalid_gtins'])
                     
                     if results_df is not None and not results_df.empty:
+                        results_df = _sanitize_for_streamlit(results_df)
                         # --- Display Stats ---
                         st.subheader("📊 Match Summary")
                         total_products = len(cleaned_customer_df)
@@ -411,7 +423,6 @@ def main():
                         
                         col1_dl, col2_dl = st.columns(2)
                         
-                        @st.cache_data
                         def to_excel(df):
                             output = BytesIO()
                             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:

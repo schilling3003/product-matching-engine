@@ -9,6 +9,15 @@ except ImportError:
     HAS_NETWORKX = False
 
 
+def _to_serializable_scalar(value: Any) -> Any:
+    """Convert non-scalar values into Arrow-safe scalar representations."""
+    if isinstance(value, (dict, list, set, tuple)):
+        return str(value)
+    if isinstance(value, (np.integer, np.floating)):
+        return value.item()
+    return value
+
+
 class UnionFind:
     """Union-Find (Disjoint Set) data structure for efficient connected component finding."""
     
@@ -225,7 +234,7 @@ def create_grouped_results(analyses: List[Dict[str, Any]],
             rep_idx = analysis['representative_idx']
             for col in display_columns:
                 if col in product_data.columns:
-                    summary[col] = product_data.iloc[rep_idx][col]
+                    summary[col] = _to_serializable_scalar(product_data.iloc[rep_idx][col])
         
         results.append(summary)
         
@@ -238,16 +247,16 @@ def create_grouped_results(analyses: List[Dict[str, Any]],
                 'Group ID': group_id,
                 'Product Name': analysis.get('member_names', [str(member_idx)])[i],
                 'Role': 'Member',
-                'Group Size': '',
-                'Avg Similarity': '',
-                'Min Similarity': ''
+                'Group Size': analysis['group_size'],
+                'Avg Similarity': None,
+                'Min Similarity': None
             }
             
             # Add additional columns if specified
             if display_columns:
                 for col in display_columns:
                     if col in product_data.columns:
-                        member_info[col] = product_data.iloc[member_idx][col]
+                        member_info[col] = _to_serializable_scalar(product_data.iloc[member_idx][col])
             
             results.append(member_info)
     
@@ -287,7 +296,7 @@ def export_groups_flat(analyses: List[Dict[str, Any]],
             if display_columns:
                 for col in display_columns:
                     if col in product_data.columns:
-                        row[col] = product_data.iloc[member_idx][col]
+                        row[col] = _to_serializable_scalar(product_data.iloc[member_idx][col])
             
             results.append(row)
     

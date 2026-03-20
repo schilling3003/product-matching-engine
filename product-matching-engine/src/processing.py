@@ -496,7 +496,10 @@ def process_grouped_results(similarity_matrix,
     
     if group_view_mode:
         # Return grouped results
-        display_columns = [col for col in product_df.columns if col != 'combined_product_name']
+        display_columns = [
+            col for col in product_df.columns
+            if col not in ['combined_product_name', 'gtin_pool']
+        ]
         results_df = create_grouped_results(filtered_analyses, product_df, display_columns)
     else:
         # Return traditional pairwise results
