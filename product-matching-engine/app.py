@@ -225,6 +225,7 @@ def main():
                     results = []
                     results_df = pd.DataFrame()
                     selected_group_output_cols = column_config['customer'].get('output_cols', [])
+                    use_grouping = is_within_file and settings.get('group_results', False)
                     
                     # Check if we have streaming results
                     if streaming_results is not None:
@@ -239,9 +240,6 @@ def main():
                             customer_col = 'Customer Product' if not is_within_file else 'Product 1'
                             results_df = results_df.groupby(customer_col).head(settings['max_matches_per_product'])
                     else:
-                        # Check if we should use grouping (only for within-file mode)
-                        use_grouping = is_within_file and settings.get('group_results', False)
-                        
                         if use_grouping:
                             # Use grouped results processing
                             product_names = cleaned_customer_df[column_config['customer']['product_cols'][0]].tolist()
@@ -400,9 +398,7 @@ def main():
                                             
                                             results.append(result_entry)
                                 
-                                # Convert results to DataFrame if not using grouping
-                                if not use_grouping:
-                                    results_df = pd.DataFrame(results)
+                                results_df = pd.DataFrame(results)
                     
                     end_time = time.time()
                     processing_time = end_time - start_time
