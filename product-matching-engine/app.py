@@ -673,34 +673,23 @@ def main():
             )
 
         if use_grouping and not threshold_summary_df.empty and not threshold_export_df.empty:
-            col1_thr, col2_thr = st.columns(2)
-            
-            with col1_thr:
-                st.download_button(
-                    label="📈 Download Threshold Explorer Workbook",
-                    data=build_threshold_workbook(_sanitize_for_streamlit(threshold_export_df), threshold_summary_df),
-                    file_name='group_threshold_explorer.xlsx',
-                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            # Enhanced Excel export with similarity matrix
+            if match_results.get('similarity_matrix') is not None:
+                enhanced_workbook = build_enhanced_threshold_workbook(
+                    similarity_matrix=match_results['similarity_matrix'],
+                    product_names=match_results['product_names'],
+                    product_df=match_results['cleaned_product_df'],
+                    group_rows_df=_sanitize_for_streamlit(threshold_export_df),
+                    summary_df=threshold_summary_df,
+                    selected_output_columns=match_results.get('selected_output_columns', [])
                 )
-            
-            with col2_thr:
-                # Enhanced Excel export with similarity matrix
-                if match_results.get('similarity_matrix') is not None:
-                    enhanced_workbook = build_enhanced_threshold_workbook(
-                        similarity_matrix=match_results['similarity_matrix'],
-                        product_names=match_results['product_names'],
-                        product_df=match_results['cleaned_product_df'],
-                        group_rows_df=_sanitize_for_streamlit(threshold_export_df),
-                        summary_df=threshold_summary_df,
-                        selected_output_columns=match_results.get('selected_output_columns', [])
-                    )
-                    st.download_button(
-                        label="📊 Download Enhanced Excel for Analysis",
-                        data=enhanced_workbook,
-                        file_name='enhanced_threshold_analysis.xlsx',
-                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                        help="Includes similarity matrix for Excel-based threshold exploration"
-                    )
+                st.download_button(
+                    label="📊 Download Threshold Explorer Workbook",
+                    data=enhanced_workbook,
+                    file_name='threshold_explorer_analysis.xlsx',
+                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    help="Complete workbook with similarity matrix, VBA macro code, and instructions for Excel-based threshold exploration"
+                )
 
 if __name__ == "__main__":
     main()

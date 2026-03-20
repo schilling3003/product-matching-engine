@@ -2,6 +2,21 @@
 
 This guide shows how to recreate the Threshold Explorer functionality in Excel using the enhanced export data.
 
+## Quick Start Options
+
+### Option 1: Automated VBA Macro (Recommended)
+For instant setup, use the VBA macro:
+1. Open `enhanced_threshold_analysis.xlsx`
+2. Press **Alt+F11** to open VBA editor
+3. Import `Excel_Threshold_Explorer_Macro.bas`
+4. Run the `SetupThresholdExplorer` macro
+5. Everything is configured automatically!
+
+*See `VBA_MACRO_SETUP.md` for detailed instructions.*
+
+### Option 2: Manual Setup
+Follow the manual steps below if you prefer not to use macros.
+
 ## What's Included in the Enhanced Excel Export?
 
 The `enhanced_threshold_analysis.xlsx` file contains:

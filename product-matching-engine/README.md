@@ -93,6 +93,8 @@ When using "Find Similar Within File" with grouping enabled:
 For detailed instructions, see:
 - `EXCEL_THRESHOLD_EXPLORER.md` - Complete guide for Excel-based analysis
 - `POWER_PIVOT_TEMPLATE.md` - Advanced Power Pivot techniques and templates
+- `VBA_MACRO_SETUP.md` - VBA macro for automated setup
+- `Threshold_Explorer_Ready_to_Use.xlsx` - Ready-to-use Excel file with macro code included
 
 ## Matching Engine Explained
 

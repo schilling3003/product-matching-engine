@@ -193,5 +193,48 @@ def build_enhanced_threshold_workbook(
         instructions_sheet.write(30, 0, '• Create a dynamic named range for threshold: =INDIRECT("SimilarityMatrix!R2C2:R"&COUNTA(SimilarityMatrix!A:A)&"C"&COUNTA(SimilarityMatrix!1:1))')
         instructions_sheet.write(31, 0, '• For large datasets, use Power Query to load and transform the data')
         instructions_sheet.write(32, 0, '• Create a dashboard with charts showing groups vs threshold')
+        instructions_sheet.write(33, 0, '')
+        instructions_sheet.write(34, 0, 'VBA Macro Code:', title_format)
+        instructions_sheet.write(35, 0, 'See the "VBA Macro Code" sheet for ready-to-use VBA code to automate setup')
+        
+        # 6. Add VBA Macro Code sheet
+        vba_sheet = workbook.add_worksheet('VBA Macro Code')
+        vba_sheet.set_column(0, 0, 100)
+        
+        # Read the fixed VBA macro
+        import os
+        vba_file_path = os.path.join(os.path.dirname(__file__), '..', 'Excel_Threshold_Explorer_Fixed.bas')
+        
+        vba_code_lines = []
+        try:
+            with open(vba_file_path, 'r', encoding='utf-8') as f:
+                vba_code_lines = f.readlines()
+        except:
+            vba_code_lines = ['VBA macro file not found. Please download from repository.']
+        
+        # Write VBA code header
+        vba_sheet.write(0, 0, 'VBA Macro Code - Copy and Paste into Excel VBA Editor', header_format)
+        vba_sheet.write(1, 0, '')
+        vba_sheet.write(2, 0, 'Instructions:', title_format)
+        vba_sheet.write(3, 0, '1. Press Alt+F11 to open VBA Editor')
+        vba_sheet.write(4, 0, '2. Insert > Module')
+        vba_sheet.write(5, 0, '3. Copy all code below (starting from "Option Explicit")')
+        vba_sheet.write(6, 0, '4. Paste into the module')
+        vba_sheet.write(7, 0, '5. Press Alt+F8 and run SetupThresholdExplorer')
+        vba_sheet.write(8, 0, '')
+        vba_sheet.write(9, 0, 'VBA Code:', title_format)
+        vba_sheet.write(10, 0, '')
+        
+        # Write VBA code
+        code_format = workbook.add_format({
+            'font_name': 'Consolas',
+            'font_size': 9,
+            'bg_color': '#F8F9FA'
+        })
+        
+        row = 11
+        for line in vba_code_lines:
+            vba_sheet.write(row, 0, line.rstrip('\n'), code_format)
+            row += 1
         
     return output.getvalue()
