@@ -21,6 +21,50 @@ def setup_sidebar():
             help="Match Between Files: Compare two different product lists\nFind Similar Within File: Find similar products in the same file"
         )
         
+        # === GROUPING OPTIONS (FOR WITHIN FILE MODE) ===
+        if matching_mode == "Find Similar Within File":
+            st.subheader("🔗 Grouping Options")
+            
+            group_results = st.checkbox(
+                "Group similar products",
+                value=True,
+                help="Group all similar products together instead of showing pairwise matches. This shows the complete picture of product duplicates."
+            )
+            
+            if group_results:
+                min_group_size = st.slider(
+                    "Minimum group size",
+                    min_value=2, max_value=10, value=2,
+                    help="Minimum number of products needed to form a group."
+                )
+                
+                max_groups = st.selectbox(
+                    "Maximum groups to show",
+                    [10, 25, 50, 100, "All"],
+                    index=2,
+                    help="Limit the number of groups shown for performance."
+                )
+                
+                if max_groups == "All":
+                    max_groups = None
+                else:
+                    max_groups = int(max_groups)
+                
+                view_mode = st.radio(
+                    "Group view mode",
+                    ["Summary with Details", "Pairwise within Groups"],
+                    help="Summary with Details: Shows representative products with expandable details\nPairwise within Groups: Shows all pairwise matches within each group"
+                )
+            else:
+                min_group_size = 2
+                max_groups = None
+                view_mode = "Pairwise within Groups"
+        else:
+            group_results = False
+            min_group_size = 2
+            max_groups = None
+            view_mode = "Pairwise within Groups"
+        
         # === SIMPLE SETTINGS FOR EVERYONE ===
         st.subheader("🎯 Basic Settings")
         
@@ -137,13 +181,16 @@ def setup_sidebar():
             size_weight = 0.0
             size_importance = "Moderate Factor"  # For display purposes
         
-        # Results limit (simplified)
-        max_matches_per_product = st.selectbox(
-            "How many matches to show per product?",
-            [1, 3, 5, 10, 20],
-            index=2,  # Default to 5
-            help="Limit the number of matches shown for each customer product."
-        )
+        # Results limit (simplified) - Only show for pairwise mode
+        if not (matching_mode == "Find Similar Within File" and group_results):
+            max_matches_per_product = st.selectbox(
+                "How many matches to show per product?",
+                [1, 3, 5, 10, 20],
+                index=2,  # Default to 5
+                help="Limit the number of matches shown for each customer product."
+            )
+        else:
+            max_matches_per_product = 5  # Default value for grouped mode
         
         # Simple explanation of current settings
         threshold_desc = f"matches need {similarity_threshold}%+ similarity"
@@ -342,6 +389,10 @@ def setup_sidebar():
 
     return {
         'matching_mode': matching_mode,
+        'group_results': group_results,
+        'min_group_size': min_group_size,
+        'max_groups': max_groups,
+        'view_mode': view_mode,
         'similarity_threshold': similarity_threshold,
         'enable_text_matching': enable_text_matching,
         'enable_gtin_matching': enable_gtin_matching,

@@ -1,13 +1,12 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import time
 from sklearn.feature_extraction.text import TfidfVectorizer
 from io import BytesIO
 
 # Import modularized components
 from src.ui import setup_sidebar, setup_column_selection
-from src.processing import clean_and_standardize, calculate_similarity_vectorized
+from src.processing import clean_and_standardize, calculate_similarity_vectorized, process_grouped_results
 from src.gtin_processing import generate_gtin_quality_report
 
 def main():
@@ -23,10 +22,10 @@ def main():
     
     # Adjust file uploaders based on matching mode
     if settings['matching_mode'] == "Find Similar Within File":
-        catalog_file = st.file_uploader("� Product File", type=["csv", "xlsx"])
-        customer_file = None  # Hide second file uploader
+        catalog_file = st.file_uploader("📁 Product File", type=["csv", "xlsx"])
+        customer_file = None  # Don't show second uploader for within-file mode
     else:
-        catalog_file = st.file_uploader("� Your Product Catalog", type=["csv", "xlsx"])
+        catalog_file = st.file_uploader("📦 Your Product Catalog", type=["csv", "xlsx"])
         customer_file = st.file_uploader("👤 Customer's Product List", type=["csv", "xlsx"])
 
     column_config = {}
@@ -70,6 +69,11 @@ def main():
                         customer_vectors = None
 
                     # --- Similarity Calculation ---
+                    # Show status for similarity calculation
+                    if is_within_file and len(cleaned_customer_df) > 10000:
+                        status_placeholder = st.empty()
+                        status_placeholder.text("🔄 Calculating similarity matrix...")
+                    
                     combined_matrix, tfidf_matrix, fuzzy_matrix, gtin_matrix, gtin_details = calculate_similarity_vectorized(
                         customer_texts=cleaned_customer_df['combined_product_name'].fillna('').tolist(),
                         catalog_texts=cleaned_catalog_df['combined_product_name'].fillna('').tolist(),
@@ -90,138 +94,178 @@ def main():
                         batch_size=settings['batch_size'],
                         within_file_mode=(settings['matching_mode'] == "Find Similar Within File")
                     )
+                    
+                    # Clear similarity calculation status
+                    if is_within_file and len(cleaned_customer_df) > 10000:
+                        status_placeholder.empty()
 
                     # --- Results Processing ---
                     results = []
                     is_within_file = settings['matching_mode'] == "Find Similar Within File"
                     
-                    # For large within-file datasets, use optimized processing
-                    if is_within_file and len(cleaned_customer_df) > 10000:
-                        print("🚀 Using optimized results processing for large dataset...")
+                    # Check if we should use grouping (only for within-file mode)
+                    use_grouping = is_within_file and settings.get('group_results', False)
+                    
+                    if use_grouping:
+                        # Use grouped results processing
+                        product_names = cleaned_customer_df[column_config['customer']['product_cols'][0]].tolist()
                         
-                        # Use numpy operations for faster processing
-                        for i in range(len(cleaned_customer_df)):
-                            if i % 1000 == 0:
-                                print(f"Processing results for product {i:,} of {len(cleaned_customer_df):,}")
-                                
-                            scores = combined_matrix[i]
-                            # Only get indices above threshold to reduce work
-                            above_threshold = np.where(scores >= settings['similarity_threshold'])[0]
-                            
-                            # Skip self in within-file mode
-                            if is_within_file:
-                                above_threshold = above_threshold[above_threshold != i]
-                            
-                            # Get top matches from above threshold
-                            if len(above_threshold) > 0:
-                                # Get scores for these indices
-                                threshold_scores = scores[above_threshold]
-                                # Get top indices within threshold
-                                top_n = min(settings['max_matches_per_product'], len(threshold_scores))
-                                top_indices_local = above_threshold[np.argsort(threshold_scores)[-top_n:][::-1]]
-                                
-                                for j in top_indices_local:
-                                    score = scores[j]
-                                    
-                                    # Use the first selected product column for display
-                                    customer_display_col = column_config['customer']['product_cols'][0]
-                                    catalog_display_col = column_config['catalog']['product_cols'][0]
-                                    
-                                    # Get the original rows for additional columns
-                                    original_customer_row = customer_df.iloc[i]
-                                    original_catalog_row = catalog_df.iloc[j]
-
-                                    if is_within_file:
-                                        # For within-file mode, show Product 1 and Product 2
-                                        result_entry = {
-                                            'Product 1': cleaned_customer_df.iloc[i][customer_display_col],
-                                            'Product 2': cleaned_catalog_df.iloc[j][catalog_display_col],
-                                            'Confidence Score': f"{score:.2f}%",
-                                            'TF-IDF Score': f"{tfidf_matrix[i, j]:.2f}%",
-                                            'Fuzzy Score': f"{fuzzy_matrix[i, j]:.2f}%"
-                                        }
-                                    else:
-                                        # Original two-file mode
-                                        result_entry = {
-                                            'Customer Product': cleaned_customer_df.iloc[i][customer_display_col],
-                                            'Catalog Product': cleaned_catalog_df.iloc[j][catalog_display_col],
-                                            'Confidence Score': f"{score:.2f}%",
-                                            'TF-IDF Score': f"{tfidf_matrix[i, j]:.2f}%",
-                                            'Fuzzy Score': f"{fuzzy_matrix[i, j]:.2f}%"
-                                        }
-                                    
-                                    # Skip GTIN and additional columns for speed in large datasets
-                                    results.append(result_entry)
+                        results_df = process_grouped_results(
+                            similarity_matrix=combined_matrix,
+                            product_df=cleaned_customer_df,
+                            product_names=product_names,
+                            similarity_threshold=settings['similarity_threshold'],
+                            min_group_size=settings.get('min_group_size', 2),
+                            max_groups=settings.get('max_groups', None),
+                            group_view_mode=(settings.get('view_mode', 'Summary with Details') == 'Summary with Details')
+                        )
                     else:
-                        # Original processing for smaller datasets
-                        for i, customer_row in cleaned_customer_df.iterrows():
-                            scores = combined_matrix[i]
-                            top_indices = scores.argsort()[-settings['max_matches_per_product']:][::-1]
+                        # Original pairwise processing
+                        # For large within-file datasets, use optimized processing
+                        if is_within_file and len(cleaned_customer_df) > 10000:
+                            print("🚀 Using optimized results processing for large dataset...")
                             
-                            for j in top_indices:
-                                score = scores[j]
-                                # Skip self-comparison in within-file mode
-                                if is_within_file and i == j:
-                                    continue
+                            # Add progress bar for large datasets
+                            progress_bar = st.progress(0, text="Processing products...")
+                            status_text = st.empty()
+                            
+                            # Use numpy operations for faster processing
+                            for i in range(len(cleaned_customer_df)):
+                                if i % 1000 == 0:
+                                    progress = (i + 1) / len(cleaned_customer_df)
+                                    progress_bar.progress(progress, text=f"Processing products... {i+1:,} of {len(cleaned_customer_df):,}")
+                                    status_text.text(f"Processing product {i+1:,} of {len(cleaned_customer_df):,}")
                                     
-                                if score >= settings['similarity_threshold']:
-                                    # Use the first selected product column for display
-                                    customer_display_col = column_config['customer']['product_cols'][0]
-                                    catalog_display_col = column_config['catalog']['product_cols'][0]
-                                    
-                                    # Get the original rows for additional columns
-                                    original_customer_row = customer_df.iloc[i]
-                                    original_catalog_row = catalog_df.iloc[j]
-
-                                    if is_within_file:
-                                        # For within-file mode, show Product 1 and Product 2
-                                        result_entry = {
-                                            'Product 1': customer_row[customer_display_col],
-                                            'Product 2': cleaned_catalog_df.iloc[j][catalog_display_col],
-                                            'Confidence Score': f"{score:.2f}%",
-                                            'TF-IDF Score': f"{tfidf_matrix[i, j]:.2f}%",
-                                            'Fuzzy Score': f"{fuzzy_matrix[i, j]:.2f}%"
-                                        }
-                                    else:
-                                        # Original two-file mode
-                                        result_entry = {
-                                            'Customer Product': customer_row[customer_display_col],
-                                            'Catalog Product': cleaned_catalog_df.iloc[j][catalog_display_col],
-                                            'Confidence Score': f"{score:.2f}%",
-                                            'TF-IDF Score': f"{tfidf_matrix[i, j]:.2f}%",
-                                            'Fuzzy Score': f"{fuzzy_matrix[i, j]:.2f}%"
-                                        }
+                                scores = combined_matrix[i]
+                                # Only keep indices above threshold to reduce work
+                                above_threshold = [
+                                    idx for idx, value in enumerate(scores)
+                                    if value >= settings['similarity_threshold'] and (not is_within_file or idx != i)
+                                ]
                                 
-                                # Add GTIN score if GTIN matching is enabled
-                                    if settings['enable_gtin_matching']:
-                                        gtin_score = gtin_matrix[i, j]
-                                        result_entry['GTIN Score'] = f"{gtin_score:.2f}%"
+                                # Get top matches from above threshold
+                                if len(above_threshold) > 0:
+                                    top_n = min(settings['max_matches_per_product'], len(above_threshold))
+                                    top_indices_local = sorted(
+                                        above_threshold,
+                                        key=lambda idx: scores[idx],
+                                        reverse=True
+                                    )[:top_n]
+                                    
+                                    for j in top_indices_local:
+                                        score = scores[j]
                                         
-                                        # Add GTIN match details if available
-                                        if (i, j) in gtin_details:
-                                            details = gtin_details[(i, j)]
-                                            result_entry['GTIN Match Type'] = details['match_type']
-                                            result_entry['Matching GTINs'] = ', '.join(details['matching_gtins'][:3])  # Limit to first 3
-                                    
-                                    # Add additional customer columns if selected
-                                    if column_config['customer']['output_cols']:
-                                        for col in column_config['customer']['output_cols']:
-                                            if col in original_customer_row.index:
-                                                if is_within_file:
-                                                    result_entry[f'Product 1 {col}'] = original_customer_row[col]
-                                                else:
-                                                    result_entry[f'Customer {col}'] = original_customer_row[col]
-                                    
-                                    # Add additional catalog columns if selected
-                                    if column_config['catalog']['output_cols']:
-                                        for col in column_config['catalog']['output_cols']:
-                                            if col in original_catalog_row.index:
-                                                if is_within_file:
-                                                    result_entry[f'Product 2 {col}'] = original_catalog_row[col]
-                                                else:
-                                                    result_entry[f'Catalog {col}'] = original_catalog_row[col]
-                                    
-                                    results.append(result_entry)
+                                        # Use the first selected product column for display
+                                        customer_display_col = column_config['customer']['product_cols'][0]
+                                        catalog_display_col = column_config['catalog']['product_cols'][0]
+                                        
+                                        # Get the original rows for additional columns
+                                        original_customer_row = customer_df.iloc[i]
+                                        original_catalog_row = catalog_df.iloc[j]
+
+                                        if is_within_file:
+                                            # For within-file mode, show Product 1 and Product 2
+                                            result_entry = {
+                                                'Product 1': cleaned_customer_df.iloc[i][customer_display_col],
+                                                'Product 2': cleaned_catalog_df.iloc[j][catalog_display_col],
+                                                'Confidence Score': f"{score:.2f}%",
+                                                'TF-IDF Score': f"{tfidf_matrix[i, j]:.2f}%",
+                                                'Fuzzy Score': f"{fuzzy_matrix[i, j]:.2f}%"
+                                            }
+                                        else:
+                                            # Original two-file mode
+                                            result_entry = {
+                                                'Customer Product': cleaned_customer_df.iloc[i][customer_display_col],
+                                                'Catalog Product': cleaned_catalog_df.iloc[j][catalog_display_col],
+                                                'Confidence Score': f"{score:.2f}%",
+                                                'TF-IDF Score': f"{tfidf_matrix[i, j]:.2f}%",
+                                                'Fuzzy Score': f"{fuzzy_matrix[i, j]:.2f}%"
+                                            }
+                                        
+                                        # Skip GTIN and additional columns for speed in large datasets
+                                        results.append(result_entry)
+                            
+                            # Complete the progress bar
+                            progress_bar.progress(1.0, text="Processing complete!")
+                            status_text.text("✅ Processing complete!")
+                            # Clear the status text after a moment
+                            import time
+                            time.sleep(0.5)
+                            status_text.empty()
+                        else:
+                            # Original processing for smaller datasets
+                            for i, customer_row in cleaned_customer_df.iterrows():
+                                scores = combined_matrix[i]
+                                top_indices = scores.argsort()[-settings['max_matches_per_product']:][::-1]
+                                
+                                for j in top_indices:
+                                    score = scores[j]
+                                    # Skip self-comparison in within-file mode
+                                    if is_within_file and i == j:
+                                        continue
+                                        
+                                    if score >= settings['similarity_threshold']:
+                                        # Use the first selected product column for display
+                                        customer_display_col = column_config['customer']['product_cols'][0]
+                                        catalog_display_col = column_config['catalog']['product_cols'][0]
+                                        
+                                        # Get the original rows for additional columns
+                                        original_customer_row = customer_df.iloc[i]
+                                        original_catalog_row = catalog_df.iloc[j]
+
+                                        if is_within_file:
+                                            # For within-file mode, show Product 1 and Product 2
+                                            result_entry = {
+                                                'Product 1': customer_row[customer_display_col],
+                                                'Product 2': cleaned_catalog_df.iloc[j][catalog_display_col],
+                                                'Confidence Score': f"{score:.2f}%",
+                                                'TF-IDF Score': f"{tfidf_matrix[i, j]:.2f}%",
+                                                'Fuzzy Score': f"{fuzzy_matrix[i, j]:.2f}%"
+                                            }
+                                        else:
+                                            # Original two-file mode
+                                            result_entry = {
+                                                'Customer Product': customer_row[customer_display_col],
+                                                'Catalog Product': cleaned_catalog_df.iloc[j][catalog_display_col],
+                                                'Confidence Score': f"{score:.2f}%",
+                                                'TF-IDF Score': f"{tfidf_matrix[i, j]:.2f}%",
+                                                'Fuzzy Score': f"{fuzzy_matrix[i, j]:.2f}%"
+                                            }
+                                        
+                                        # Add GTIN score if GTIN matching is enabled
+                                        if settings['enable_gtin_matching']:
+                                            gtin_score = gtin_matrix[i, j]
+                                            result_entry['GTIN Score'] = f"{gtin_score:.2f}%"
+                                            
+                                            # Add GTIN match details if available
+                                            if (i, j) in gtin_details:
+                                                details = gtin_details[(i, j)]
+                                                result_entry['GTIN Match Type'] = details['match_type']
+                                                result_entry['Matching GTINs'] = ', '.join(details['matching_gtins'][:3])  # Limit to first 3
+                                        
+                                        # Add additional customer columns if selected
+                                        if column_config['customer']['output_cols']:
+                                            for col in column_config['customer']['output_cols']:
+                                                if col in original_customer_row.index:
+                                                    if is_within_file:
+                                                        result_entry[f'Product 1 {col}'] = original_customer_row[col]
+                                                    else:
+                                                        result_entry[f'Customer {col}'] = original_customer_row[col]
+                                        
+                                        # Add additional catalog columns if selected
+                                        if column_config['catalog']['output_cols']:
+                                            for col in column_config['catalog']['output_cols']:
+                                                if col in original_catalog_row.index:
+                                                    if is_within_file:
+                                                        result_entry[f'Product 2 {col}'] = original_catalog_row[col]
+                                                    else:
+                                                        result_entry[f'Catalog {col}'] = original_catalog_row[col]
+                                        
+                                        results.append(result_entry)
+                        
+                        # Convert results to DataFrame if not using grouping
+                        if not use_grouping:
+                            results_df = pd.DataFrame(results)
                     
                     end_time = time.time()
                     processing_time = end_time - start_time
@@ -257,36 +301,62 @@ def main():
                                     if customer_report['invalid_gtins'] > 0:
                                         st.metric("Invalid GTINs", customer_report['invalid_gtins'])
                     
-                    if results:
-                        results_df = pd.DataFrame(results)
-
+                    if results_df is not None and not results_df.empty:
                         # --- Display Stats ---
                         st.subheader("📊 Match Summary")
                         total_products = len(cleaned_customer_df)
                         
-                        if is_within_file:
+                        if use_grouping:
+                            # For grouped results, count groups and members
+                            if 'Group ID' in results_df.columns:
+                                # Count unique groups
+                                unique_groups = results_df['Group ID'].nunique()
+                                # Count products in groups (exclude summary rows)
+                                products_in_groups = len(results_df[results_df['Role'] == 'Member']) + len(results_df[results_df['Role'] == 'Representative'])
+                                # Calculate average confidence from numeric columns
+                                if 'Confidence Score' in results_df.columns:
+                                    confidence_scores = pd.to_numeric(results_df['Confidence Score'].str.replace('%', ''), errors='coerce')
+                                    avg_confidence = confidence_scores.mean()
+                                elif 'Avg Similarity' in results_df.columns:
+                                    # Use Avg Similarity from summary rows
+                                    avg_sim = results_df[results_df['Role'] == 'Representative']['Avg Similarity']
+                                    avg_confidence = pd.to_numeric(avg_sim.str.replace('%', ''), errors='coerce').mean()
+                                else:
+                                    avg_confidence = 0
+                                
+                                col1.metric("Total Products", f"{total_products}")
+                                col2.metric("Groups Found", f"{unique_groups}")
+                                col3.metric("Products in Groups", f"{products_in_groups}")
+                                col4.metric("Avg. Similarity", f"{avg_confidence:.2f}%")
+                            else:
+                                # Pairwise within groups
+                                total_matches = len(results_df)
+                                avg_confidence = pd.to_numeric(results_df['Confidence Score'].str.replace('%', '')).mean()
+                                col1.metric("Total Products", f"{total_products}")
+                                col2.metric("Total Matches", f"{total_matches}")
+                                col3.metric("Groups Found", f"{results_df['Group ID'].nunique()}")
+                                col4.metric("Avg. Confidence", f"{avg_confidence:.2f}%")
+                        elif is_within_file:
                             # For within-file mode, count unique product pairs
                             unique_pairs = set()
-                            for result in results:
-                                pair = tuple(sorted([result['Product 1'], result['Product 2']]))
+                            for _, row in results_df.iterrows():
+                                pair = tuple(sorted([row['Product 1'], row['Product 2']]))
                                 unique_pairs.add(pair)
                             products_with_matches = len(unique_pairs)
-                        else:
-                            # Original two-file mode
-                            products_with_matches = results_df['Customer Product'].nunique()
+                            total_matches = len(results_df)
+                            avg_confidence = pd.to_numeric(results_df['Confidence Score'].str.replace('%', '')).mean()
                             
-                        total_matches = len(results_df)
-                        # Convert confidence score to numeric for calculation
-                        avg_confidence = pd.to_numeric(results_df['Confidence Score'].str.replace('%', '')).mean()
-
-                        col1, col2, col3, col4 = st.columns(4)
-                        if is_within_file:
                             col1.metric("Total Products", f"{total_products}")
                             col2.metric("Unique Similar Pairs", f"{products_with_matches}")
                             col3.metric("Total Matches", f"{total_matches}")
                             col4.metric("Avg. Confidence", f"{avg_confidence:.2f}%")
                         else:
-                            col1.metric("Total Customer Products", f"{total_customer_products}")
+                            # Original two-file mode
+                            products_with_matches = results_df['Customer Product'].nunique()
+                            total_matches = len(results_df)
+                            avg_confidence = pd.to_numeric(results_df['Confidence Score'].str.replace('%', '')).mean()
+                            
+                            col1.metric("Total Customer Products", f"{total_products}")
                             col2.metric("Products with Matches", f"{products_with_matches}")
                             col3.metric("Total Matches Found", f"{total_matches}")
                             col4.metric("Avg. Confidence", f"{avg_confidence:.2f}%")
@@ -295,6 +365,29 @@ def main():
 
                         # --- Download Buttons ---
                         st.subheader("📥 Download Results")
+                        
+                        # Add export format options for grouped results
+                        if use_grouping and 'Group ID' in results_df.columns:
+                            export_format = st.radio(
+                                "Export Format",
+                                ["Grouped Format", "Flat Format with Group IDs"],
+                                help="Grouped Format: Shows groups with representative and members\nFlat Format: One row per product with group IDs"
+                            )
+                            
+                            if export_format == "Flat Format with Group IDs":
+                                from src.product_grouping import export_groups_flat
+                                # Get analyses for flat export
+                                product_names = cleaned_customer_df[column_config['customer']['product_cols'][0]].tolist()
+                                from src.product_grouping import find_product_groups, analyze_groups
+                                groups = find_product_groups(combined_matrix, threshold=settings['similarity_threshold'])
+                                analyses = analyze_groups(combined_matrix, groups, product_names)
+                                filtered_analyses = [a for a in analyses if a['group_size'] >= settings.get('min_group_size', 2)]
+                                export_df = export_groups_flat(filtered_analyses, cleaned_customer_df, column_config['customer']['output_cols'])
+                            else:
+                                export_df = results_df
+                        else:
+                            export_df = results_df
+                        
                         col1_dl, col2_dl = st.columns(2)
                         
                         @st.cache_data
@@ -308,14 +401,14 @@ def main():
                         with col1_dl:
                             st.download_button(
                                 label="📄 Download as CSV",
-                                data=results_df.to_csv(index=False).encode('utf-8'),
+                                data=export_df.to_csv(index=False).encode('utf-8'),
                                 file_name='product_matches.csv',
                                 mime='text/csv',
                             )
                         with col2_dl:
                             st.download_button(
                                 label="📊 Download as Excel",
-                                data=to_excel(results_df),
+                                data=to_excel(export_df),
                                 file_name='product_matches.xlsx',
                                 mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
                             )

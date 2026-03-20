@@ -9,6 +9,7 @@ import multiprocessing as mp
 
 from .config import STOP_WORDS, UNIT_CONVERSION_MAP
 from .gtin_processing import consolidate_gtin_columns, calculate_gtin_match_confidence
+from .product_grouping import find_product_groups, analyze_groups, create_grouped_results, export_groups_flat, filter_groups
 
 def clean_and_standardize(df, column_config, remove_stop_words=True, case_sensitive=False, include_size_in_text=False):
     """Cleans and standardizes the product data in a DataFrame, including complex size handling and GTIN processing."""
@@ -444,3 +445,82 @@ def calculate_similarity(text1, text2_series, vectorizer, catalog_vectors, custo
     # Weighted average - all scores on 0-100 scale
     combined_scores = (tfidf_scores * tfidf_weight) + (fuzzy_scores * fuzzy_weight) + (size_scores * size_weight)
     return combined_scores
+
+
+def process_grouped_results(similarity_matrix, 
+                           product_df, 
+                           product_names,
+                           similarity_threshold=80.0,
+                           min_group_size=2,
+                           max_groups=None,
+                           group_view_mode=True):
+    """
+    Process similarity matrix to create grouped product results.
+    
+    Args:
+        similarity_matrix: NxN matrix of similarity scores
+        product_df: DataFrame with product information
+        product_names: List of product names for display
+        similarity_threshold: Minimum similarity to consider products connected
+        min_group_size: Minimum group size to include in results
+        max_groups: Maximum number of groups to return
+        group_view_mode: If True, return grouped format; if False, return pairwise format
+        
+    Returns:
+        DataFrame with results (grouped or pairwise)
+    """
+    # Find product groups using connected components
+    groups = find_product_groups(similarity_matrix, threshold=similarity_threshold)
+    
+    if not groups:
+        return pd.DataFrame()
+    
+    # Analyze groups to get statistics
+    analyses = analyze_groups(similarity_matrix, groups, product_names)
+    
+    # Filter groups based on criteria
+    filtered_analyses = filter_groups(
+        analyses, 
+        min_group_size=min_group_size,
+        max_groups=max_groups,
+        sort_by='size'
+    )
+    
+    if not filtered_analyses:
+        return pd.DataFrame()
+    
+    if group_view_mode:
+        # Return grouped results
+        display_columns = [col for col in product_df.columns if col != 'combined_product_name']
+        results_df = create_grouped_results(filtered_analyses, product_df, display_columns)
+    else:
+        # Return traditional pairwise results
+        results = []
+        for analysis in filtered_analyses:
+            member_indices = analysis['member_indices']
+            
+            # Create pairwise combinations within the group
+            for i in range(len(member_indices)):
+                for j in range(i + 1, len(member_indices)):
+                    idx1, idx2 = member_indices[i], member_indices[j]
+                    score = similarity_matrix[idx1][idx2]
+                    
+                    result = {
+                        'Product 1': product_names[idx1],
+                        'Product 2': product_names[idx2],
+                        'Confidence Score': f"{score:.2f}%",
+                        'Group ID': analysis['group_id'],
+                        'Group Size': analysis['group_size']
+                    }
+                    
+                    # Add additional columns from product_df
+                    for col in product_df.columns:
+                        if col not in ['combined_product_name']:
+                            result[f'Product 1 {col}'] = product_df.iloc[idx1][col]
+                            result[f'Product 2 {col}'] = product_df.iloc[idx2][col]
+                    
+                    results.append(result)
+        
+        results_df = pd.DataFrame(results)
+    
+    return results_df
