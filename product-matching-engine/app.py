@@ -99,8 +99,13 @@ def main():
             if settings['matching_mode'] == "Find Similar Within File":
                 # For within-file mode, use the same dataframe for both
                 customer_df = catalog_df.copy()
+                # Detect and store potential restriction columns in session state
+                from src.ui import smart_detect_restriction_columns
+                available_restriction_columns = smart_detect_restriction_columns(catalog_df)
+                st.session_state['available_restriction_columns'] = available_restriction_columns
             else:
                 customer_df = pd.read_csv(customer_file) if 'csv' in customer_file.name else pd.read_excel(customer_file)
+                st.session_state['available_restriction_columns'] = []
             
             # Get column configurations from UI
             column_config = setup_column_selection(catalog_df, customer_df, settings['include_size_matching'], 
@@ -161,6 +166,25 @@ def main():
                     
                     # Use memory-efficient calculation for large datasets
                     streaming_results = None
+                    restriction_data = None
+                    
+                    # Prepare restriction data for processing
+                    if is_within_file and settings.get('restrict_matches') and settings.get('selected_restrictions'):
+                        restriction_data = {
+                            'columns': settings['selected_restrictions'],
+                            'customer_data': [],
+                            'catalog_data': []
+                        }
+                        for col in settings['selected_restrictions']:
+                            if col in customer_df.columns:
+                                restriction_data['customer_data'].append(customer_df[col].fillna('').tolist())
+                            else:
+                                restriction_data['customer_data'].append([''] * len(customer_df))
+                            if col in catalog_df.columns:
+                                restriction_data['catalog_data'].append(catalog_df[col].fillna('').tolist())
+                            else:
+                                restriction_data['catalog_data'].append([''] * len(catalog_df))
+                    
                     if use_memory_efficient:
                         result = calculate_similarity_memory_efficient(
                             customer_texts=cleaned_customer_df['combined_product_name'].fillna('').tolist(),
@@ -181,7 +205,8 @@ def main():
                             enable_multiprocessing=settings['enable_multiprocessing'],
                             batch_size=settings['batch_size'],
                             within_file_mode=(settings['matching_mode'] == "Find Similar Within File"),
-                            progress_callback=progress_callback
+                            progress_callback=progress_callback,
+                            restriction_data=restriction_data
                         )
                         
                         # Check if streaming was used (returns 6 items instead of 5)
@@ -212,7 +237,8 @@ def main():
                             enable_multiprocessing=settings['enable_multiprocessing'],
                             batch_size=settings['batch_size'],
                             within_file_mode=(settings['matching_mode'] == "Find Similar Within File"),
-                            progress_callback=progress_callback
+                            progress_callback=progress_callback,
+                            restriction_data=restriction_data
                         )
                     
                     # Clear similarity calculation status
@@ -294,6 +320,20 @@ def main():
                                         for j in top_indices_local:
                                             score = scores[j]
                                             
+                                            # Apply restriction filters if enabled
+                                            if is_within_file and settings.get('restrict_matches') and settings.get('selected_restrictions'):
+                                                skip_match = False
+                                                for restriction_col in settings['selected_restrictions']:
+                                                    if restriction_col in customer_df.columns and restriction_col in catalog_df.columns:
+                                                        val1 = customer_df.iloc[i][restriction_col]
+                                                        val2 = catalog_df.iloc[j][restriction_col]
+                                                        # Handle NaN values and compare
+                                                        if pd.isna(val1) or pd.isna(val2) or str(val1).lower() != str(val2).lower():
+                                                            skip_match = True
+                                                            break
+                                                if skip_match:
+                                                    continue
+                                            
                                             # Use the first selected product column for display
                                             customer_display_col = column_config['customer']['product_cols'][0]
                                             catalog_display_col = column_config['catalog']['product_cols'][0]
@@ -341,6 +381,20 @@ def main():
                                         # Skip self-comparison in within-file mode
                                         if is_within_file and i == j:
                                             continue
+                                        
+                                        # Apply restriction filters if enabled
+                                        if is_within_file and settings.get('restrict_matches') and settings.get('selected_restrictions'):
+                                            skip_match = False
+                                            for restriction_col in settings['selected_restrictions']:
+                                                if restriction_col in customer_df.columns and restriction_col in catalog_df.columns:
+                                                    val1 = customer_df.iloc[i][restriction_col]
+                                                    val2 = catalog_df.iloc[j][restriction_col]
+                                                    # Handle NaN values and compare
+                                                    if pd.isna(val1) or pd.isna(val2) or str(val1).lower() != str(val2).lower():
+                                                        skip_match = True
+                                                        break
+                                            if skip_match:
+                                                continue
                                             
                                         if score >= settings['similarity_threshold']:
                                             # Use the first selected product column for display

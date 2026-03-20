@@ -14,6 +14,7 @@ This user-friendly application helps you find matching products between two list
 - **Text Matching**: Uses a hybrid approach combining semantic understanding (TF-IDF) and spelling similarity (Fuzzy Matching) to find matches even with different phrasing.
 - **GTIN Matching**: Robustly matches products using GTIN/UPC/Barcode data. It automatically handles messy data, including missing check digits, mixed formats (GTIN-8/12/13/14), and case-vs-unit relationships.
 - **Size Matching**: Compares standardized product sizes (e.g., '12 oz' vs '355ml') with a configurable tolerance, adding another layer of accuracy.
+- **Match Restrictions**: Restrict matches to products within the same category, commodity, or other custom columns (available in "Find Similar Within File" mode).
 
 ### 🚀 Performance Optimizations
 - **Vectorized Operations**: Uses NumPy for high-speed, matrix-based calculations, avoiding slow row-by-row processing.
@@ -63,11 +64,12 @@ This will open the application in your default web browser.
 
 ## How to Use
 
-1.  **Upload Files**: Upload your product catalog and customer list (CSV or Excel).
+1.  **Upload Files**: Upload your product catalog and customer list (CSV or Excel), or a single file for "Find Similar Within File" mode.
 2.  **Configure Columns**: The app will try to auto-detect your columns. Review and adjust the mappings for product names, sizes, and GTINs as needed.
 3.  **Adjust Settings**: Use the simple sidebar controls to set your desired matching strictness and enable/disable Text, GTIN, or Size matching.
-4.  **Find Matches**: Click the "Find Matches" button to start the analysis.
-5.  **Review Results**: Examine the match summary, GTIN quality report, and the detailed results table. Download the results if needed.
+4.  **(Optional) Set Restrictions**: In "Find Similar Within File" mode, you can restrict matches to products within the same category, commodity, or other columns.
+5.  **Find Matches**: Click the "Find Matches" button to start the analysis.
+6.  **Review Results**: Examine the match summary, GTIN quality report, and the detailed results table. Download the results if needed.
 
 ## Matching Engine Explained
 
@@ -77,6 +79,7 @@ The application uses a sophisticated, multi-layered approach to find the most ac
 - **Text Matching (TF-IDF + Fuzzy)**: This is the default method. It first understands the *meaning* of product names (semantic search) and then checks for *spelling similarities* (fuzzy search). You can control the balance between these two.
 - **GTIN Matching**: When enabled, this method looks for matches in your barcode data. It's highly accurate and can find matches even if the GTINs are incomplete or in different formats. If a GTIN match is found, it is weighted heavily in the final score.
 - **Size Matching**: This optional method gives a bonus to products with similar sizes, helping to distinguish between, for example, a 1-liter bottle and a 2-liter bottle of the same drink.
+- **Match Restrictions**: Available in "Find Similar Within File" mode, this feature allows you to restrict matches to products that share the same values in selected columns (e.g., only match products within the same category).
 
 ### Scoring Logic
 - The final **Confidence Score** is a weighted average of the enabled matching methods.

@@ -196,7 +196,7 @@ def calculate_similarity_memory_efficient(customer_texts, catalog_texts, custome
                                         customer_sizes=None, catalog_sizes=None, size_tolerance=20,
                                         customer_gtins=None, catalog_gtins=None,
                                         similarity_threshold=50, early_filter=True, enable_multiprocessing=True, batch_size=1000,
-                                        within_file_mode=False, progress_callback=None, max_memory_mb=1500):
+                                        within_file_mode=False, progress_callback=None, max_memory_mb=1500, restriction_data=None):
     """
     Memory-efficient similarity calculation.
     For large datasets: processes in chunks, extracts results immediately, discards chunk matrices.
@@ -215,7 +215,7 @@ def calculate_similarity_memory_efficient(customer_texts, catalog_texts, custome
             tfidf_weight, fuzzy_weight, gtin_weight, size_weight,
             customer_sizes, catalog_sizes, size_tolerance,
             customer_gtins, catalog_gtins, similarity_threshold, early_filter,
-            enable_multiprocessing, batch_size, within_file_mode, progress_callback
+            enable_multiprocessing, batch_size, within_file_mode, progress_callback, restriction_data
         )
     else:
         return calculate_similarity_vectorized(
@@ -223,7 +223,7 @@ def calculate_similarity_memory_efficient(customer_texts, catalog_texts, custome
             tfidf_weight, fuzzy_weight, gtin_weight, size_weight,
             customer_sizes, catalog_sizes, size_tolerance,
             customer_gtins, catalog_gtins, similarity_threshold, early_filter,
-            enable_multiprocessing, batch_size, within_file_mode, progress_callback
+            enable_multiprocessing, batch_size, within_file_mode, progress_callback, restriction_data
         )
 
 
@@ -231,7 +231,7 @@ def _chunked_extract_results(customer_texts, catalog_texts, customer_vectors, ca
                              tfidf_weight, fuzzy_weight, gtin_weight, size_weight,
                              customer_sizes, catalog_sizes, size_tolerance,
                              customer_gtins, catalog_gtins, similarity_threshold, early_filter,
-                             enable_multiprocessing, batch_size, within_file_mode, progress_callback):
+                             enable_multiprocessing, batch_size, within_file_mode, progress_callback, restriction_data=None):
     """
     Vectorized chunk processing that never stores full N×N matrices.
     Each chunk is processed fully (TF-IDF, fuzzy, size, GTIN), results above threshold
@@ -337,6 +337,19 @@ def _chunked_extract_results(customer_texts, catalog_texts, customer_vectors, ca
         above = np.argwhere(chunk_combined >= similarity_threshold)
         for i_local, j in above:
             i_global = chunk_start + i_local
+            
+            # Apply restriction filters if enabled
+            if restriction_data and within_file_mode:
+                skip_match = False
+                for idx, col in enumerate(restriction_data['columns']):
+                    cust_val = restriction_data['customer_data'][idx][i_global]
+                    cat_val = restriction_data['catalog_data'][idx][j]
+                    if cust_val.lower() != cat_val.lower():
+                        skip_match = True
+                        break
+                if skip_match:
+                    continue
+            
             match_results.append((
                 i_global, int(j),
                 float(chunk_combined[i_local, j]),
@@ -740,7 +753,7 @@ def calculate_similarity_vectorized(customer_texts, catalog_texts, customer_vect
                                   customer_sizes=None, catalog_sizes=None, size_tolerance=20,
                                   customer_gtins=None, catalog_gtins=None,
                                   similarity_threshold=50, early_filter=True, enable_multiprocessing=True, batch_size=1000,
-                                  within_file_mode=False, progress_callback=None):
+                                  within_file_mode=False, progress_callback=None, restriction_data=None):
     """
     Vectorized similarity calculation that processes all comparisons at once.
     Much faster than row-by-row processing. Now includes GTIN matching capability.

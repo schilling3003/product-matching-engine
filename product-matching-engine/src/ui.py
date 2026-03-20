@@ -7,6 +7,24 @@ def smart_detect_product_name_columns(df):
     potential_names = ['product_name', 'description', 'short_name', 'long_name', 'name', 'title', 'product', 'print name', 'item name']
     return [col for col in df.columns if col.lower() in potential_names]
 
+def smart_detect_restriction_columns(df):
+    """Smartly detects potential columns for restricting matches (e.g., Category, Commodity)."""
+    potential_restrictions = [
+        'category', 'commodity', 'department', 'type', 'class', 'group', 'segment',
+        'division', 'section', 'line', 'family', 'brand', 'supplier', 'vendor',
+        'product_type', 'product_category', 'item_type', 'item_category',
+        'category_name', 'commodity_code', 'dept', 'dept_name'
+    ]
+    detected = [col for col in df.columns if col.lower() in potential_restrictions]
+    # Also look for columns with limited unique values (good candidates for restrictions)
+    for col in df.columns:
+        if col not in detected and df[col].dtype == 'object':
+            unique_count = df[col].nunique()
+            # If column has between 2 and 50 unique values, it might be a good restriction
+            if 2 <= unique_count <= 50 and unique_count < len(df) * 0.5:
+                detected.append(col)
+    return detected
+
 def setup_sidebar():
     """Sets up the Streamlit sidebar with all the matching settings."""
     with st.sidebar:
@@ -20,6 +38,33 @@ def setup_sidebar():
             ["Match Between Files", "Find Similar Within File"],
             help="Match Between Files: Compare two different product lists\nFind Similar Within File: Find similar products in the same file"
         )
+        
+        # === MATCH RESTRICTIONS (FOR WITHIN FILE MODE) ===
+        if matching_mode == "Find Similar Within File":
+            st.subheader("🔒 Match Restrictions")
+            
+            restrict_matches = st.checkbox(
+                "Restrict matches to same category",
+                value=False,
+                help="Only match products that have the same values in selected columns (e.g., Category, Commodity)."
+            )
+            
+            restriction_columns = []
+            if restrict_matches:
+                # Will be populated after file upload
+                restriction_columns = st.session_state.get('available_restriction_columns', [])
+                selected_restrictions = st.multiselect(
+                    "Columns to restrict matches by",
+                    restriction_columns,
+                    default=[],
+                    key="restriction_columns",
+                    help="Products will only match if they have identical values in these columns."
+                )
+            else:
+                selected_restrictions = []
+        else:
+            restrict_matches = False
+            selected_restrictions = []
         
         # === GROUPING OPTIONS (FOR WITHIN FILE MODE) ===
         if matching_mode == "Find Similar Within File":
@@ -224,12 +269,17 @@ def setup_sidebar():
         
         methods_desc = " + ".join(methods) if methods else "no methods selected"
         
+        # Build restriction description
+        restriction_desc = ""
+        if restrict_matches and selected_restrictions:
+            restriction_desc = f" • restricted by {', '.join(selected_restrictions)}"
+        
         if matching_mode == "Find Similar Within File" and group_results:
             result_scope_desc = f"up to {max_groups if max_groups is not None else 'all'} groups"
         else:
             result_scope_desc = f"up to {max_matches_per_product} matches per product"
 
-        st.info(f"🍽️ **Setup:** {strictness.lower()} ({threshold_desc}) • {methods_desc} • {result_scope_desc}")
+        st.info(f"🍽️ **Setup:** {strictness.lower()} ({threshold_desc}) • {methods_desc}{restriction_desc} • {result_scope_desc}")
         
         # Method-specific tips
         if enable_text_matching and enable_gtin_matching:
@@ -412,6 +462,8 @@ def setup_sidebar():
 
     return {
         'matching_mode': matching_mode,
+        'restrict_matches': restrict_matches,
+        'selected_restrictions': selected_restrictions,
         'group_results': group_results,
         'min_group_size': min_group_size,
         'max_groups': max_groups,
