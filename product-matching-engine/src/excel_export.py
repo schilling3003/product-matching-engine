@@ -5,7 +5,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.chart import LineChart, Reference
 from openpyxl.utils.dataframe import dataframe_to_rows
-from openpyxl.formatting.rule import ColorScaleRule
+from openpyxl.formatting.rule import ColorScaleRule, FormulaRule
 from openpyxl.worksheet.datavalidation import DataValidation
 
 
@@ -112,24 +112,82 @@ def _write_summary_sheet(ws, summary_df, header_fill, header_font, border_thin):
 
 
 def _write_groups_sheet(ws, groups_df, header_fill, header_font, border_thin):
-    """Write the Groups sheet with all group membership data."""
+    """Write the Groups sheet with dynamic threshold filtering."""
     # Write title
-    ws['A1'] = "Group Membership Across All Thresholds"
+    ws['A1'] = "Group Membership - Filtered by Threshold"
     ws['A1'].font = Font(bold=True, size=14)
-    ws.merge_cells('A1:G1')
+    ws.merge_cells('A1:H1')
     
-    # Write data starting at row 3
-    for r_idx, row in enumerate(dataframe_to_rows(groups_df, index=False, header=True), start=3):
+    # Instructions
+    ws['A2'] = "Groups automatically filter based on threshold selected in Dashboard sheet"
+    ws['A2'].font = Font(italic=True, size=10)
+    ws.merge_cells('A2:H2')
+    
+    # Threshold display (linked to Dashboard)
+    ws['A3'] = "Current Threshold:"
+    ws['A3'].font = Font(bold=True, size=11)
+    ws['B3'] = "=Dashboard!$B$4"
+    ws['B3'].font = Font(bold=True, size=11, color="4472C4")
+    ws['B3'].fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    ws['B3'].border = border_thin
+    ws['B3'].alignment = Alignment(horizontal='center', vertical='center')
+    
+    # Write all data starting at row 5 (for filtering)
+    for r_idx, row in enumerate(dataframe_to_rows(groups_df, index=False, header=True), start=5):
         for c_idx, value in enumerate(row, start=1):
             cell = ws.cell(row=r_idx, column=c_idx, value=value)
             
             # Header row formatting
-            if r_idx == 3:
+            if r_idx == 5:
                 cell.fill = header_fill
                 cell.font = header_font
                 cell.alignment = Alignment(horizontal='center', vertical='center')
             
             cell.border = border_thin
+    
+    # Add dynamic filtering using Excel formulas
+    # Create a helper column that checks if row matches selected threshold
+    last_row = len(groups_df) + 5
+    ws['H5'] = "Filter"
+    ws['H5'].fill = header_fill
+    ws['H5'].font = header_font
+    ws['H5'].alignment = Alignment(horizontal='center', vertical='center')
+    
+    # Add filter formula to all data rows
+    for row_idx in range(6, last_row + 1):
+        ws[f'H{row_idx}'] = f'=IF(A{row_idx}=Dashboard!$B$4, 1, 0)'
+    
+    # Add conditional formatting to highlight visible rows
+    for row_idx in range(6, last_row + 1):
+        # Highlight rows that match the threshold
+        ws.conditional_formatting.add(
+            f'A{row_idx}:G{row_idx}',
+            FormulaRule(
+                formula=[f'=$H{row_idx}=1'],
+                stopIfTrue=True,
+                fill=PatternFill(start_color="E8F5E8", end_color="E8F5E8", fill_type="solid")
+            )
+        )
+        
+        # Dim rows that don't match
+        ws.conditional_formatting.add(
+            f'A{row_idx}:G{row_idx}',
+            FormulaRule(
+                formula=[f'=$H{row_idx}=0'],
+                stopIfTrue=True,
+                fill=PatternFill(start_color="F5F5F5", end_color="F5F5F5", fill_type="solid"),
+                font=Font(color="999999")
+            )
+        )
+    
+    # Add count of visible groups
+    ws['D3'] = "Groups at this Threshold:"
+    ws['D3'].font = Font(bold=True, size=11)
+    ws['E3'] = f'=COUNTIF(H6:H{last_row}, 1)'
+    ws['E3'].font = Font(bold=True, size=11, color="4472C4")
+    ws['E3'].fill = PatternFill(start_color="E7E6E6", end_color="E7E6E6", fill_type="solid")
+    ws['E3'].border = border_thin
+    ws['E3'].alignment = Alignment(horizontal='center', vertical='center')
     
     # Auto-size columns
     for column_cells in ws.columns:
@@ -148,8 +206,12 @@ def _write_groups_sheet(ws, groups_df, header_fill, header_font, border_thin):
             adjusted_width = min(max_length + 2, 40)
             ws.column_dimensions[column_letter].width = adjusted_width
     
+    # Set column H (filter) to be narrow and hide it
+    ws.column_dimensions['H'].width = 5
+    ws.column_dimensions['H'].hidden = True
+    
     # Freeze header row
-    ws.freeze_panes = 'A4'
+    ws.freeze_panes = 'A6'
 
 
 def _write_dashboard_sheet(ws, summary_df, title_font, header_fill, header_font, border_thin):
