@@ -555,7 +555,7 @@ def main():
         current_results_df = results_df  # Start with original results
         if use_grouping and threshold_values:
             st.subheader("🎚️ Threshold Explorer")
-            st.dataframe(threshold_summary_df, use_container_width=True)
+            st.dataframe(threshold_summary_df, width='stretch')
 
             preview_threshold = st.selectbox(
                 "Preview grouped results at threshold",
@@ -575,14 +575,23 @@ def main():
 
         # --- Display Stats ---
         st.subheader("📊 Match Summary")
-        col1, col2, col3, col4 = st.columns(4)
-
-        if use_grouping:
+        
+        # Add detailed summary text
+        if use_grouping and 'Group ID' in current_results_df.columns:
             if {'Group ID', 'Group Summary'}.issubset(current_results_df.columns):
                 unique_groups = current_results_df['Group ID'].nunique()
                 products_in_groups = len(current_results_df)
                 avg_confidence = pd.to_numeric(current_results_df['Group Avg Similarity'], errors='coerce').mean()
-
+                
+                # Calculate group size distribution
+                group_sizes = current_results_df.groupby('Group ID').size().sort_values(ascending=False)
+                largest_group_size = group_sizes.iloc[0] if len(group_sizes) > 0 else 0
+                smallest_group_size = group_sizes.iloc[-1] if len(group_sizes) > 0 else 0
+                
+                st.write(f"Found **{unique_groups} groups** containing **{products_in_groups} products** out of {total_products} total products.")
+                st.write(f"Group sizes range from **{smallest_group_size}** to **{largest_group_size}** products.")
+                
+                col1, col2, col3, col4 = st.columns(4)
                 col1.metric("Total Products", f"{total_products}")
                 col2.metric("Groups Found", f"{unique_groups}")
                 col3.metric("Products in Groups", f"{products_in_groups}")
@@ -590,6 +599,15 @@ def main():
             elif 'Group ID' in current_results_df.columns and 'Confidence Score' in current_results_df.columns:
                 total_matches = len(current_results_df)
                 avg_confidence = pd.to_numeric(current_results_df['Confidence Score'].str.replace('%', '')).mean()
+                
+                # Calculate group size distribution
+                group_sizes = current_results_df.groupby('Group ID').size().sort_values(ascending=False)
+                largest_group_size = group_sizes.iloc[0] if len(group_sizes) > 0 else 0
+                smallest_group_size = group_sizes.iloc[-1] if len(group_sizes) > 0 else 0
+                
+                st.write(f"Found **{current_results_df['Group ID'].nunique()} groups** with **{total_matches} total matches**.")
+                st.write(f"Group sizes range from **{smallest_group_size}** to **{largest_group_size}** products.")
+                
                 col1.metric("Total Products", f"{total_products}")
                 col2.metric("Total Matches", f"{total_matches}")
                 col3.metric("Groups Found", f"{current_results_df['Group ID'].nunique()}")
@@ -599,19 +617,23 @@ def main():
             for _, row in current_results_df.iterrows():
                 pair = tuple(sorted([row['Product 1'], row['Product 2']]))
                 unique_pairs.add(pair)
-            products_with_matches = len(unique_pairs)
+            products_with_matches = len(unique_pairs) * 2  # Each pair has 2 products
             total_matches = len(current_results_df)
             avg_confidence = pd.to_numeric(current_results_df['Confidence Score'].str.replace('%', '')).mean()
-
+            
+            st.write(f"Found **{total_matches} similar pairs** involving **{products_with_matches}** products out of {total_products} total products.")
+            
             col1.metric("Total Products", f"{total_products}")
-            col2.metric("Unique Similar Pairs", f"{products_with_matches}")
+            col2.metric("Unique Similar Pairs", f"{len(unique_pairs)}")
             col3.metric("Total Matches", f"{total_matches}")
             col4.metric("Avg. Confidence", f"{avg_confidence:.2f}%")
         else:
             products_with_matches = current_results_df['Customer Product'].nunique()
             total_matches = len(current_results_df)
             avg_confidence = pd.to_numeric(current_results_df['Confidence Score'].str.replace('%', '')).mean()
-
+            
+            st.write(f"Found **{total_matches} matches** for **{products_with_matches}** customer products out of {total_products} total products.")
+            
             col1.metric("Total Customer Products", f"{total_products}")
             col2.metric("Products with Matches", f"{products_with_matches}")
             col3.metric("Total Matches Found", f"{total_matches}")
@@ -688,7 +710,7 @@ def main():
                     data=enhanced_workbook,
                     file_name='threshold_explorer_analysis.xlsx',
                     mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                    help="Complete workbook with similarity matrix, VBA macro code, and instructions for Excel-based threshold exploration"
+                    help="Interactive Excel workbook with threshold dropdown selector and auto-updating metrics. No VBA or Power Pivot required - works in any Excel version."
                 )
 
 if __name__ == "__main__":
