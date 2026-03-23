@@ -3,7 +3,8 @@ import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from thefuzz import fuzz
+from rapidfuzz import fuzz
+from rapidfuzz.process import cdist
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing as mp
 import gc
@@ -150,41 +151,18 @@ def calculate_size_similarity(size1, size2, tolerance_percent=20):
 
 def batch_fuzzy_matching(customer_texts, catalog_texts, chunk_size=1000):
     """
-    Optimized batch fuzzy matching using multiprocessing.
+    Optimized batch fuzzy matching using RapidFuzz C++ extension.
     Returns a matrix of fuzzy scores.
     """
-    def fuzzy_chunk(args):
-        customer_chunk, catalog_texts, start_idx = args
-        results = []
-        for i, customer_text in enumerate(customer_chunk):
-            scores = [fuzz.token_set_ratio(customer_text, catalog_text) for catalog_text in catalog_texts]
-            results.append((start_idx + i, scores))
-        return results
-    
-    # Split customer texts into chunks for parallel processing
-    chunks = []
-    for i in range(0, len(customer_texts), chunk_size):
-        chunk = customer_texts[i:i + chunk_size]
-        chunks.append((chunk, catalog_texts, i))
-    
-    # Use multiprocessing for CPU-intensive fuzzy matching
-    num_cores = min(mp.cpu_count(), len(chunks))
-    if num_cores > 1 and len(customer_texts) > 100:  # Only use multiprocessing for larger datasets
-        with ProcessPoolExecutor(max_workers=num_cores) as executor:
-            chunk_results = list(executor.map(fuzzy_chunk, chunks))
-        
-        # Combine results
-        fuzzy_matrix = np.zeros((len(customer_texts), len(catalog_texts)))
-        for chunk_result in chunk_results:
-            for customer_idx, scores in chunk_result:
-                fuzzy_matrix[customer_idx] = scores
-    else:
-        # Single-threaded for smaller datasets to avoid overhead
-        fuzzy_matrix = np.zeros((len(customer_texts), len(catalog_texts)))
-        for i, customer_text in enumerate(customer_texts):
-            for j, catalog_text in enumerate(catalog_texts):
-                fuzzy_matrix[i, j] = fuzz.token_set_ratio(customer_text, catalog_text)
-    
+    # RapidFuzz's cdist is implemented in C++ and automatically uses all available cores
+    # when workers=-1. It is orders of magnitude faster than Python multiprocessing loops.
+    fuzzy_matrix = cdist(
+        customer_texts, 
+        catalog_texts, 
+        scorer=fuzz.token_set_ratio,
+        workers=-1,
+        dtype=np.float64
+    )
     return fuzzy_matrix
 
 def get_memory_usage_mb():
