@@ -7,6 +7,7 @@ from thefuzz import fuzz
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing as mp
 import gc
+import heapq
 import psutil
 import os
 
@@ -196,7 +197,8 @@ def calculate_similarity_memory_efficient(customer_texts, catalog_texts, custome
                                         customer_sizes=None, catalog_sizes=None, size_tolerance=20,
                                         customer_gtins=None, catalog_gtins=None,
                                         similarity_threshold=50, early_filter=True, enable_multiprocessing=True, batch_size=1000,
-                                        within_file_mode=False, progress_callback=None, max_memory_mb=1500, restriction_data=None):
+                                        within_file_mode=False, progress_callback=None, max_memory_mb=1500,
+                                        restriction_data=None, max_matches_per_product=None):
     """
     Memory-efficient similarity calculation.
     For large datasets: processes in chunks, extracts results immediately, discards chunk matrices.
@@ -224,7 +226,8 @@ def calculate_similarity_memory_efficient(customer_texts, catalog_texts, custome
             tfidf_weight, fuzzy_weight, gtin_weight, size_weight,
             customer_sizes, catalog_sizes, size_tolerance,
             customer_gtins, catalog_gtins, similarity_threshold, early_filter,
-            enable_multiprocessing, batch_size, within_file_mode, progress_callback, restriction_data
+            enable_multiprocessing, batch_size, within_file_mode, progress_callback,
+            restriction_data, max_matches_per_product
         )
     else:
         return calculate_similarity_vectorized(
@@ -240,7 +243,8 @@ def _chunked_extract_results(customer_texts, catalog_texts, customer_vectors, ca
                              tfidf_weight, fuzzy_weight, gtin_weight, size_weight,
                              customer_sizes, catalog_sizes, size_tolerance,
                              customer_gtins, catalog_gtins, similarity_threshold, early_filter,
-                             enable_multiprocessing, batch_size, within_file_mode, progress_callback, restriction_data=None):
+                             enable_multiprocessing, batch_size, within_file_mode, progress_callback,
+                             restriction_data=None, max_matches_per_product=None):
     """
     Vectorized chunk processing that never stores full N×N matrices.
     Each chunk is processed fully (TF-IDF, fuzzy, size, GTIN), results above threshold
@@ -255,8 +259,14 @@ def _chunked_extract_results(customer_texts, catalog_texts, customer_vectors, ca
     chunk_size = max(50, min(500, int(200 * 1024 * 1024 / (n_catalog * 8 * 4))))
     print(f"🔄 Chunked extraction: {n_customers:,} products in chunks of {chunk_size:,}")
 
-    # Accumulate only the sparse results, not full matrices
-    match_results = []   # list of (i, j, combined, tfidf, fuzzy, gtin, size) tuples
+    # Accumulate only sparse results, not full matrices
+    match_results = []
+    use_topk_between_files = (
+        not within_file_mode and
+        max_matches_per_product is not None and
+        int(max_matches_per_product) > 0
+    )
+    topk_by_customer = {} if use_topk_between_files else None
     gtin_details = {}
 
     for chunk_start in range(0, n_customers, chunk_size):
@@ -359,16 +369,36 @@ def _chunked_extract_results(customer_texts, catalog_texts, customer_vectors, ca
                 if skip_match:
                     continue
             
-            match_results.append((
+            rec_key = (i_global, int(j))
+            rec = (
                 i_global, int(j),
                 float(chunk_combined[i_local, j]),
                 float(chunk_tfidf[i_local, j]),
                 float(chunk_fuzzy[i_local, j]),
                 float(chunk_gtin[i_local, j]),
                 float(chunk_size_mat[i_local, j])
-            ))
-            if (i_local, j) in chunk_gtin_details:
-                gtin_details[(i_global, int(j))] = chunk_gtin_details[(i_local, j)]
+            )
+            has_gtin_detail = (i_local, j) in chunk_gtin_details
+
+            if topk_by_customer is None:
+                match_results.append(rec)
+                if has_gtin_detail:
+                    gtin_details[rec_key] = chunk_gtin_details[(i_local, j)]
+            else:
+                heap = topk_by_customer.setdefault(i_global, [])
+                item = (float(chunk_combined[i_local, j]), rec_key, rec, has_gtin_detail)
+                k_limit = int(max_matches_per_product)
+
+                if len(heap) < k_limit:
+                    heapq.heappush(heap, item)
+                    if has_gtin_detail:
+                        gtin_details[rec_key] = chunk_gtin_details[(i_local, j)]
+                elif item[0] > heap[0][0]:
+                    removed_score, removed_key, _, removed_had_gtin = heapq.heapreplace(heap, item)
+                    if removed_had_gtin and removed_key in gtin_details:
+                        del gtin_details[removed_key]
+                    if has_gtin_detail:
+                        gtin_details[rec_key] = chunk_gtin_details[(i_local, j)]
 
         # Discard chunk matrices immediately
         del chunk_tfidf, chunk_fuzzy, chunk_size_mat, chunk_gtin, chunk_combined, chunk_gtin_details
@@ -376,6 +406,11 @@ def _chunked_extract_results(customer_texts, catalog_texts, customer_vectors, ca
 
     if progress_callback is not None:
         progress_callback(1.0, n_customers, n_customers)
+
+    if topk_by_customer is not None:
+        for heap in topk_by_customer.values():
+            ordered = sorted(heap, key=lambda x: x[0], reverse=True)
+            match_results.extend(item[2] for item in ordered)
 
     print(f"✅ Chunked extraction complete: {len(match_results):,} matches found")
     # Return sentinel so app.py knows this is streaming results

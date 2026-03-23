@@ -344,7 +344,8 @@ def main():
                             batch_size=settings['batch_size'],
                             within_file_mode=(settings['matching_mode'] == "Find Similar Within File"),
                             progress_callback=progress_callback,
-                            restriction_data=restriction_data
+                            restriction_data=restriction_data,
+                            max_matches_per_product=(None if is_within_file else settings['max_matches_per_product'])
                         )
                         
                         # Handle all result shapes returned by processing layer.
@@ -413,9 +414,14 @@ def main():
                     # Check if we have streaming results
                     if streaming_results is not None:
                         print("📊 Converting streaming results to DataFrame...")
+                        streaming_topk_already_applied = (
+                            not is_within_file and
+                            use_memory_efficient and
+                            settings.get('max_matches_per_product', 0) > 0
+                        )
                         # Between-files mode only needs top-k per customer in final output.
                         # Limit before DataFrame expansion to avoid large post-similarity memory spikes.
-                        if not is_within_file:
+                        if not is_within_file and not streaming_topk_already_applied:
                             filter_progress = st.progress(0, text="Limiting to top matches per customer...")
                             filter_status = st.empty()
 
