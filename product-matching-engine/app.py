@@ -623,6 +623,7 @@ def main():
             
             st.write(f"Found **{total_matches} similar pairs** involving **{products_with_matches}** products out of {total_products} total products.")
             
+            col1, col2, col3, col4 = st.columns(4)
             col1.metric("Total Products", f"{total_products}")
             col2.metric("Unique Similar Pairs", f"{len(unique_pairs)}")
             col3.metric("Total Matches", f"{total_matches}")
@@ -634,6 +635,7 @@ def main():
             
             st.write(f"Found **{total_matches} matches** for **{products_with_matches}** customer products out of {total_products} total products.")
             
+            col1, col2, col3, col4 = st.columns(4)
             col1.metric("Total Customer Products", f"{total_products}")
             col2.metric("Products with Matches", f"{products_with_matches}")
             col3.metric("Total Matches Found", f"{total_matches}")
