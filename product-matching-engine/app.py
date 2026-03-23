@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import time
 from sklearn.feature_extraction.text import TfidfVectorizer
 from io import BytesIO
@@ -263,8 +264,43 @@ def main():
                             streaming_results, cleaned_customer_df, cleaned_catalog_df,
                             column_config, is_within_file, settings, gtin_details=gtin_details
                         )
-                        # Filter to top matches per product if needed
-                        if settings['max_matches_per_product'] and not is_within_file:
+                        
+                        # Apply grouping if enabled for within-file mode
+                        if use_grouping:
+                            print("🔗 Applying grouping to streaming results...")
+                            # Convert pairwise results to similarity matrix for grouping
+                            n_products = len(cleaned_customer_df)
+                            combined_matrix = np.zeros((n_products, n_products))
+                            
+                            for _, row in results_df.iterrows():
+                                # Extract product indices from the original streaming results
+                                # Find matching products in the dataframe
+                                prod1 = row['Product 1']
+                                prod2 = row['Product 2']
+                                
+                                # Find indices
+                                prod1_idx = cleaned_customer_df[cleaned_customer_df[column_config['customer']['product_cols'][0]] == prod1].index[0]
+                                prod2_idx = cleaned_customer_df[cleaned_customer_df[column_config['customer']['product_cols'][0]] == prod2].index[0]
+                                
+                                # Extract confidence score
+                                conf_score = float(row['Confidence Score'].replace('%', ''))
+                                combined_matrix[prod1_idx, prod2_idx] = conf_score
+                                combined_matrix[prod2_idx, prod1_idx] = conf_score
+                            
+                            # Now apply grouped results processing
+                            results_df = process_grouped_results(
+                                similarity_matrix=combined_matrix,
+                                product_df=cleaned_customer_df,
+                                product_names=product_names,
+                                similarity_threshold=settings['similarity_threshold'],
+                                min_group_size=settings.get('min_group_size', 2),
+                                max_groups=settings.get('max_groups', None),
+                                group_view_mode=(settings.get('view_mode', 'Summary with Details') == 'Summary with Details'),
+                                selected_output_columns=selected_group_output_cols,
+                                conservative_grouping=True,
+                            )
+                        # Filter to top matches per product if needed (only for non-grouped mode)
+                        elif settings['max_matches_per_product'] and not is_within_file:
                             # Group by customer product and take top matches
                             customer_col = 'Customer Product' if not is_within_file else 'Product 1'
                             results_df = results_df.groupby(customer_col).head(settings['max_matches_per_product'])
