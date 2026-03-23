@@ -159,24 +159,46 @@ def _write_groups_sheet(ws, groups_df, header_fill, header_font, border_thin):
     
     if is_evolution_data:
         # For evolution data, filter by both threshold and membership status
-        ws['I5'] = "Filter"
-        ws['I5'].fill = header_fill
-        ws['I5'].font = header_font
-        ws['I5'].alignment = Alignment(horizontal='center', vertical='center')
+        # Find column indices for Threshold and In Group
+        threshold_col = None
+        in_group_col = None
+        
+        for col_idx, col_name in enumerate(groups_df.columns, start=1):
+            if col_name == 'Threshold':
+                threshold_col = col_idx
+            elif col_name == 'In Group':
+                in_group_col = col_idx
+        
+        if threshold_col is None or in_group_col is None:
+            raise ValueError("Evolution data must have 'Threshold' and 'In Group' columns")
+        
+        # Convert to Excel column letters
+        from openpyxl.utils import get_column_letter
+        threshold_col_letter = get_column_letter(threshold_col)
+        in_group_col_letter = get_column_letter(in_group_col)
+        filter_col_letter = get_column_letter(len(groups_df.columns) + 1)
+        
+        # Add filter column header
+        ws[f'{filter_col_letter}5'] = "Filter"
+        ws[f'{filter_col_letter}5'].fill = header_fill
+        ws[f'{filter_col_letter}5'].font = header_font
+        ws[f'{filter_col_letter}5'].alignment = Alignment(horizontal='center', vertical='center')
         
         # Add filter formula to all data rows
         for row_idx in range(6, last_row + 1):
             # Check if threshold matches AND product is in group
-            # Column H contains 'In Group' values (TRUE/FALSE)
-            ws[f'I{row_idx}'] = f'=IF(AND(C{row_idx}=Dashboard!$B$4, H{row_idx}=TRUE), 1, 0)'
+            ws[f'{filter_col_letter}{row_idx}'] = f'=IF(AND({threshold_col_letter}{row_idx}=Dashboard!$B$4, {in_group_col_letter}{row_idx}=TRUE), 1, 0)'
+        
+        # Determine last data column for formatting
+        last_data_col_letter = get_column_letter(len(groups_df.columns))
         
         # Add conditional formatting for membership status
         for row_idx in range(6, last_row + 1):
             # Active members (green)
             ws.conditional_formatting.add(
-                f'A{row_idx}:H{row_idx}',
+                f'A{row_idx}:{last_data_col_letter}{row_idx}',
                 FormulaRule(
-                    formula=[f'=$I{row_idx}=1'],
+                    formula=[f'=${filter_col_letter}{row_idx}=1'],
                     stopIfTrue=True,
                     fill=PatternFill(start_color="E8F5E8", end_color="E8F5E8", fill_type="solid")
                 )
@@ -184,9 +206,9 @@ def _write_groups_sheet(ws, groups_df, header_fill, header_font, border_thin):
             
             # Inactive members at this threshold (light gray)
             ws.conditional_formatting.add(
-                f'A{row_idx}:H{row_idx}',
+                f'A{row_idx}:{last_data_col_letter}{row_idx}',
                 FormulaRule(
-                    formula=[f'AND(C{row_idx}=Dashboard!$B$4, I{row_idx}=0)'],
+                    formula=[f'AND({threshold_col_letter}{row_idx}=Dashboard!$B$4, {filter_col_letter}{row_idx}=0)'],
                     stopIfTrue=True,
                     fill=PatternFill(start_color="F5F5F5", end_color="F5F5F5", fill_type="solid"),
                     font=Font(color="999999")
@@ -195,9 +217,9 @@ def _write_groups_sheet(ws, groups_df, header_fill, header_font, border_thin):
             
             # Members at other thresholds (very light gray)
             ws.conditional_formatting.add(
-                f'A{row_idx}:H{row_idx}',
+                f'A{row_idx}:{last_data_col_letter}{row_idx}',
                 FormulaRule(
-                    formula=[f'C{row_idx}<>Dashboard!$B$4'],
+                    formula=[f'{threshold_col_letter}{row_idx}<>Dashboard!$B$4'],
                     stopIfTrue=True,
                     fill=PatternFill(start_color="FAFAFA", end_color="FAFAFA", fill_type="solid"),
                     font=Font(color="CCCCCC")
@@ -207,15 +229,15 @@ def _write_groups_sheet(ws, groups_df, header_fill, header_font, border_thin):
         # Add count of active members
         ws['D3'] = "Active Members:"
         ws['D3'].font = Font(bold=True, size=11)
-        ws['E3'] = f'=COUNTIFS(I6:I{last_row}, 1)'
+        ws['E3'] = f'=COUNTIFS({filter_col_letter}6:{filter_col_letter}{last_row}, 1)'
         ws['E3'].font = Font(bold=True, size=11, color="4472C4")
         ws['E3'].fill = PatternFill(start_color="E7E6E6", end_color="E7E6E6", fill_type="solid")
         ws['E3'].border = border_thin
         ws['E3'].alignment = Alignment(horizontal='center', vertical='center')
         
         # Hide the filter column
-        ws.column_dimensions['I'].width = 5
-        ws.column_dimensions['I'].hidden = True
+        ws.column_dimensions[filter_col_letter].width = 5
+        ws.column_dimensions[filter_col_letter].hidden = True
         
     else:
         # Original filtering logic for non-evolution data

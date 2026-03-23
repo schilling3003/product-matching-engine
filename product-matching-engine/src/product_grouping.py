@@ -274,41 +274,41 @@ def compute_group_evolution(similarity_matrix: np.ndarray,
                     current_members.append(member_idx)
                     similarities.append(similarity_matrix[rep_idx][member_idx])
             
-            # Only include if group still meets minimum size
-            if len(current_members) >= min_group_size:
-                min_similarity = min(similarities) if similarities else 0
-                avg_similarity = sum(similarities) / len(similarities) if similarities else 0
-                
-                # Add row for each current member
-                for member_idx in current_members:
-                    evolution_data.append({
-                        'Group ID': group_id,
-                        'Group Summary': group_info['representative_name'],
-                        'Threshold': threshold,
-                        'Product Name': product_names[member_idx],
-                        'Is Representative': member_idx == rep_idx,
-                        'Similarity to Representative': similarity_matrix[rep_idx][member_idx],
-                        'Group Size at Threshold': len(current_members),
-                        'Group Min Similarity': round(min_similarity, 2),
-                        'Group Avg Similarity': round(avg_similarity, 2),
-                        'In Group': True
+            # Track all groups, even if they shrink below minimum size
+            # This allows users to see group evolution completely
+            min_similarity = min(similarities) if similarities else 0
+            avg_similarity = sum(similarities) / len(similarities) if similarities else 0
+            
+            # Add row for each current member
+            for member_idx in current_members:
+                evolution_data.append({
+                    'Group ID': group_id,
+                    'Group Summary': group_info['representative_name'],
+                    'Threshold': threshold,
+                    'Product Name': product_names[member_idx],
+                    'Is Representative': member_idx == rep_idx,
+                    'Similarity to Representative': similarity_matrix[rep_idx][member_idx],
+                    'Group Size at Threshold': len(current_members),
+                    'Group Min Similarity': round(min_similarity, 2),
+                    'Group Avg Similarity': round(avg_similarity, 2),
+                    'In Group': True
+            })
+            
+            # Add rows for members that dropped out (for comparison)
+            dropped_members = original_members - set(current_members)
+            for member_idx in dropped_members:
+                evolution_data.append({
+                    'Group ID': group_id,
+                    'Group Summary': group_info['representative_name'],
+                    'Threshold': threshold,
+                    'Product Name': product_names[member_idx],
+                    'Is Representative': member_idx == rep_idx,
+                    'Similarity to Representative': similarity_matrix[rep_idx][member_idx],
+                    'Group Size at Threshold': len(current_members),
+                    'Group Min Similarity': round(min_similarity, 2),
+                    'Group Avg Similarity': round(avg_similarity, 2),
+                    'In Group': False
                 })
-                
-                # Add rows for members that dropped out (for comparison)
-                dropped_members = original_members - set(current_members)
-                for member_idx in dropped_members:
-                    evolution_data.append({
-                        'Group ID': group_id,
-                        'Group Summary': group_info['representative_name'],
-                        'Threshold': threshold,
-                        'Product Name': product_names[member_idx],
-                        'Is Representative': member_idx == rep_idx,
-                        'Similarity to Representative': similarity_matrix[rep_idx][member_idx],
-                        'Group Size at Threshold': len(current_members),
-                        'Group Min Similarity': round(min_similarity, 2),
-                        'Group Avg Similarity': round(avg_similarity, 2),
-                        'In Group': False
-                    })
     
     return pd.DataFrame(evolution_data)
 
