@@ -95,7 +95,7 @@ def main():
     if catalog_file and (customer_file or settings['matching_mode'] == "Find Similar Within File"):
         try:
             # Load dataframes
-            catalog_df = pd.read_csv(catalog_file) if 'csv' in catalog_file.name else pd.read_excel(catalog_file)
+            catalog_df = pd.read_csv(catalog_file, low_memory=False) if 'csv' in catalog_file.name else pd.read_excel(catalog_file)
             
             if settings['matching_mode'] == "Find Similar Within File":
                 # For within-file mode, use the same dataframe for both
@@ -105,7 +105,7 @@ def main():
                 available_restriction_columns = smart_detect_restriction_columns(catalog_df)
                 st.session_state['available_restriction_columns'] = available_restriction_columns
             else:
-                customer_df = pd.read_csv(customer_file) if 'csv' in customer_file.name else pd.read_excel(customer_file)
+                customer_df = pd.read_csv(customer_file, low_memory=False) if 'csv' in customer_file.name else pd.read_excel(customer_file)
                 st.session_state['available_restriction_columns'] = []
             
             # Get column configurations from UI
@@ -141,7 +141,7 @@ def main():
                         customer_vectors = None
 
                     # --- Similarity Calculation ---
-                    # Show status for similarity calculation on large within-file jobs
+                    # Show status for similarity calculation on large jobs
                     status_placeholder = None
                     similarity_progress_bar = None
                     similarity_status_text = None
@@ -152,7 +152,9 @@ def main():
                     use_memory_efficient = dataset_size > 5_000_000  # 5M elements threshold
                     use_streaming = dataset_size > 50_000_000  # 50M elements for streaming
                     
-                    if is_within_file and len(cleaned_customer_df) > 10000:
+                    # Show progress bar for large datasets (both within-file and between-files)
+                    if (is_within_file and len(cleaned_customer_df) > 10000) or \
+                       (not is_within_file and dataset_size > 1_000_000):  # 1M elements for between-files
                         status_placeholder = st.empty()
                         status_placeholder.text("🔄 Calculating similarity matrix...")
                         similarity_progress_bar = st.progress(0, text="Calculating similarity matrix...")
@@ -260,10 +262,22 @@ def main():
                     # Check if we have streaming results
                     if streaming_results is not None:
                         print("📊 Converting streaming results to DataFrame...")
+                        # Show progress for large streaming results
+                        if len(streaming_results) > 10000:
+                            streaming_progress = st.progress(0, text="Converting results...")
+                            streaming_status = st.empty()
+                            streaming_status.text(f"Processing {len(streaming_results):,} matches...")
+                        
                         results_df = convert_streaming_results_to_dataframe(
                             streaming_results, cleaned_customer_df, cleaned_catalog_df,
                             column_config, is_within_file, settings, gtin_details=gtin_details
                         )
+                        
+                        if len(streaming_results) > 10000:
+                            streaming_progress.progress(1.0, text="Conversion complete!")
+                            streaming_status.text("✅ Conversion complete!")
+                            time.sleep(0.5)
+                            streaming_status.empty()
                         
                         # Apply grouping if enabled for within-file mode
                         if use_grouping:
@@ -322,8 +336,9 @@ def main():
                             )
                         else:
                             # Original pairwise processing
-                            # For large within-file datasets, use optimized processing
-                            if is_within_file and len(cleaned_customer_df) > 10000:
+                            # For large datasets, use optimized processing with progress bar
+                            if (is_within_file and len(cleaned_customer_df) > 10000) or \
+                               (not is_within_file and len(cleaned_customer_df) > 5000):  # 5K for between-files
                                 print("🚀 Using optimized results processing for large dataset...")
                                 
                                 # Add progress bar for large datasets
@@ -408,7 +423,20 @@ def main():
                                 status_text.empty()
                             else:
                                 # Original processing for smaller datasets
+                                # Add progress bar for medium-sized between-files datasets
+                                results_progress_bar = None
+                                results_status_text = None
+                                if not is_within_file and len(cleaned_customer_df) > 1000:
+                                    results_progress_bar = st.progress(0, text="Processing matches...")
+                                    results_status_text = st.empty()
+                                
                                 for i, customer_row in cleaned_customer_df.iterrows():
+                                    # Update progress bar for medium datasets
+                                    if results_progress_bar is not None and i % 100 == 0:
+                                        progress = (i + 1) / len(cleaned_customer_df)
+                                        results_progress_bar.progress(progress, text=f"Processing matches... {i+1:,} of {len(cleaned_customer_df):,}")
+                                        results_status_text.text(f"Processing product {i+1:,} of {len(cleaned_customer_df):,}")
+                                    
                                     scores = combined_matrix[i]
                                     top_indices = scores.argsort()[-settings['max_matches_per_product']:][::-1]
                                     
@@ -490,6 +518,13 @@ def main():
                                                             result_entry[f'Catalog {col}'] = original_catalog_row[col]
                                             
                                             results.append(result_entry)
+                                
+                                # Complete the progress bar for medium datasets
+                                if results_progress_bar is not None:
+                                    results_progress_bar.progress(1.0, text="Processing complete!")
+                                    results_status_text.text("✅ Processing complete!")
+                                    time.sleep(0.5)
+                                    results_status_text.empty()
                                 
                                 results_df = pd.DataFrame(results)
                     
@@ -644,6 +679,7 @@ def main():
                 st.write(f"Found **{current_results_df['Group ID'].nunique()} groups** with **{total_matches} total matches**.")
                 st.write(f"Group sizes range from **{smallest_group_size}** to **{largest_group_size}** products.")
                 
+                col1, col2, col3, col4 = st.columns(4)
                 col1.metric("Total Products", f"{total_products}")
                 col2.metric("Total Matches", f"{total_matches}")
                 col3.metric("Groups Found", f"{current_results_df['Group ID'].nunique()}")
