@@ -525,8 +525,8 @@ def main():
                             )
                         else:
                             # Original pairwise processing
-                            # For large datasets, use optimized processing with progress bar
-                            if (is_within_file and len(cleaned_customer_df) > 10000) or (not is_within_file):
+                            # For large within-file datasets, use optimized processing with progress bar
+                            if is_within_file and len(cleaned_customer_df) > 10000:
                                 print("🚀 Using optimized results processing for large dataset...")
                                 
                                 # Add progress bar for large datasets
