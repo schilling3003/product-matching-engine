@@ -94,7 +94,8 @@ def update_results_with_additional_columns(match_results, new_column_config, is_
     return pd.DataFrame(rows)
 
 def convert_streaming_results_to_dataframe(streaming_results, cleaned_customer_df, cleaned_catalog_df,
-                                         column_config, is_within_file, settings, gtin_details=None):
+                                         column_config, is_within_file, settings, gtin_details=None,
+                                         progress_callback=None):
     """Convert chunked extraction results (list of tuples) to the expected DataFrame format."""
     if not streaming_results:
         return pd.DataFrame()
@@ -105,7 +106,11 @@ def convert_streaming_results_to_dataframe(streaming_results, cleaned_customer_d
     catalog_out_cols = column_config['catalog'].get('output_cols', [])
 
     rows = []
+    total_records = len(streaming_results)
     for idx, rec in enumerate(streaming_results):
+        if progress_callback is not None and (idx % 250 == 0 or idx == total_records - 1):
+            progress_callback((idx + 1) / total_records, idx + 1, total_records)
+
         # Handle both old format (6 elements) and new format (7 elements with size)
         if len(rec) == 7:
             i, j, combined, tfidf_s, fuzzy_s, gtin_s, size_s = rec
@@ -238,9 +243,8 @@ def main():
                     use_memory_efficient = dataset_size > 5_000_000  # 5M elements threshold
                     use_streaming = dataset_size > 50_000_000  # 50M elements for streaming
                     
-                    # Show progress bar for large datasets (both within-file and between-files)
-                    if (is_within_file and len(cleaned_customer_df) > 10000) or \
-                       (not is_within_file and dataset_size > 1_000_000):  # 1M elements for between-files
+                    # Show progress for between-files mode (always) and large within-file jobs.
+                    if (is_within_file and len(cleaned_customer_df) > 10000) or (not is_within_file):
                         status_placeholder = st.empty()
                         status_placeholder.text("🔄 Calculating similarity matrix...")
                         similarity_progress_bar = st.progress(0, text="Calculating similarity matrix...")
@@ -364,18 +368,30 @@ def main():
                     # Check if we have streaming results
                     if streaming_results is not None:
                         print("📊 Converting streaming results to DataFrame...")
-                        # Show progress for large streaming results
-                        if len(streaming_results) > 10000:
+                        show_streaming_progress = (not is_within_file) or (len(streaming_results) > 10000)
+                        streaming_progress = None
+                        streaming_status = None
+                        conversion_progress_callback = None
+
+                        if show_streaming_progress:
                             streaming_progress = st.progress(0, text="Converting results...")
                             streaming_status = st.empty()
-                            streaming_status.text(f"Processing {len(streaming_results):,} matches...")
+                            streaming_status.text(f"Processing 0 of {len(streaming_results):,} matches...")
+
+                            def conversion_progress_callback(progress, current, total):
+                                streaming_progress.progress(
+                                    progress,
+                                    text=f"Converting results... {current:,} of {total:,}"
+                                )
+                                streaming_status.text(f"Processing {current:,} of {total:,} matches...")
                         
                         results_df = convert_streaming_results_to_dataframe(
                             streaming_results, cleaned_customer_df, cleaned_catalog_df,
-                            column_config, is_within_file, settings, gtin_details=gtin_details
+                            column_config, is_within_file, settings, gtin_details=gtin_details,
+                            progress_callback=conversion_progress_callback
                         )
                         
-                        if len(streaming_results) > 10000:
+                        if show_streaming_progress:
                             streaming_progress.progress(1.0, text="Conversion complete!")
                             streaming_status.text("✅ Conversion complete!")
                             time.sleep(0.5)
@@ -439,8 +455,7 @@ def main():
                         else:
                             # Original pairwise processing
                             # For large datasets, use optimized processing with progress bar
-                            if (is_within_file and len(cleaned_customer_df) > 10000) or \
-                               (not is_within_file and len(cleaned_customer_df) > 5000):  # 5K for between-files
+                            if (is_within_file and len(cleaned_customer_df) > 10000) or (not is_within_file):
                                 print("🚀 Using optimized results processing for large dataset...")
                                 
                                 # Add progress bar for large datasets
