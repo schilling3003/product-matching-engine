@@ -205,6 +205,15 @@ def calculate_similarity_memory_efficient(customer_texts, catalog_texts, custome
     n_customers = len(customer_texts)
     n_catalog = len(catalog_texts)
 
+    def _emit_progress(progress):
+        if progress_callback is None:
+            return
+        clamped = max(0.0, min(1.0, float(progress)))
+        current = min(n_customers, max(0, int(clamped * n_customers)))
+        progress_callback(clamped, current, n_customers)
+
+    _emit_progress(0.02)
+
     estimated_memory_mb = (n_customers * n_catalog * 8 * 4) / 1024 / 1024
     use_chunked = estimated_memory_mb > max_memory_mb or n_customers > 10000
 
@@ -761,6 +770,15 @@ def calculate_similarity_vectorized(customer_texts, catalog_texts, customer_vect
     """
     n_customers = len(customer_texts)
     n_catalog = len(catalog_texts)
+
+    def _emit_progress(progress):
+        if progress_callback is None:
+            return
+        clamped = max(0.0, min(1.0, float(progress)))
+        current = min(n_customers, max(0, int(clamped * n_customers)))
+        progress_callback(clamped, current, n_customers)
+
+    _emit_progress(0.02)
     
     # For within-file mode, set diagonal to 0 to avoid self-matching
     if within_file_mode and n_customers == n_catalog:
@@ -772,6 +790,7 @@ def calculate_similarity_vectorized(customer_texts, catalog_texts, customer_vect
         tfidf_matrix = cosine_similarity(customer_vectors, catalog_vectors) * 100
     else:
         tfidf_matrix = np.zeros((n_customers, n_catalog))
+    _emit_progress(0.20)
     
     # Fuzzy similarity matrix - skip entirely if not needed
     if fuzzy_weight > 0:
@@ -793,7 +812,7 @@ def calculate_similarity_vectorized(customer_texts, catalog_texts, customer_vect
                     if i % 1000 == 0:
                         print(f"Processing product {i:,} of {n_customers:,}")
                         if progress_callback is not None:
-                            progress_callback((i + 1) / n_customers, i + 1, n_customers)
+                            progress_callback(0.20 + (0.60 * ((i + 1) / n_customers)), i + 1, n_customers)
                     
                     tfidf_row = tfidf_matrix[i]
                     # Much stricter filtering for large datasets
@@ -820,7 +839,7 @@ def calculate_similarity_vectorized(customer_texts, catalog_texts, customer_vect
                         fuzzy_matrix[i, j] = fuzz.token_set_ratio(cust_text, catalog_texts[j])
 
                 if progress_callback is not None:
-                    progress_callback(1.0, n_customers, n_customers)
+                    progress_callback(0.80, n_customers, n_customers)
             # If catalog is moderate size, compute full fuzzy for maximal recall
             elif n_customers * n_catalog <= 5_000_000 or n_catalog <= 5000:
                 if enable_multiprocessing and n_customers * n_catalog > 10000:
@@ -837,6 +856,9 @@ def calculate_similarity_vectorized(customer_texts, catalog_texts, customer_vect
                 top_k = max(1000, int(0.2 * n_catalog))  # at least 1000 or top 20% of catalog
 
                 for i in range(n_customers):
+                    if progress_callback is not None and i % 200 == 0:
+                        progress_callback(0.20 + (0.60 * ((i + 1) / n_customers)), i + 1, n_customers)
+
                     tfidf_row = tfidf_matrix[i]
                     # Indices above minimal threshold
                     above_thresh = np.where(tfidf_row >= min_tfidf_for_fuzzy)[0]
@@ -855,6 +877,7 @@ def calculate_similarity_vectorized(customer_texts, catalog_texts, customer_vect
                     cust_text = customer_texts[i]
                     for j in cand_idx:
                         fuzzy_matrix[i, j] = fuzz.token_set_ratio(cust_text, catalog_texts[j])
+                _emit_progress(0.80)
         else:
             # Calculate full fuzzy matrix using batch processing
             if enable_multiprocessing and n_customers * n_catalog > 10000:
@@ -862,9 +885,11 @@ def calculate_similarity_vectorized(customer_texts, catalog_texts, customer_vect
             else:
                 # Single-threaded for smaller datasets
                 fuzzy_matrix = np.array([[fuzz.token_set_ratio(c_text, cat_text) for cat_text in catalog_texts] for c_text in customer_texts])
+            _emit_progress(0.80)
     else:
         # Skip fuzzy calculation entirely if not needed
         fuzzy_matrix = np.zeros((n_customers, n_catalog))
+        _emit_progress(0.80)
     
     # Size similarity matrix (vectorized)
     size_matrix = np.zeros((n_customers, n_catalog))
@@ -873,6 +898,7 @@ def calculate_similarity_vectorized(customer_texts, catalog_texts, customer_vect
             if customer_size:
                 for j, catalog_size in enumerate(catalog_sizes):
                     size_matrix[i, j] = calculate_size_similarity(customer_size, catalog_size, size_tolerance)
+    _emit_progress(0.90)
     
     # GTIN similarity matrix - Use consistent approach to restore original behavior
     gtin_matrix = np.zeros((n_customers, n_catalog))
@@ -911,6 +937,7 @@ def calculate_similarity_vectorized(customer_texts, catalog_texts, customer_vect
                             'match_type': best_match_type,
                             'matching_gtins': best_matching_gtins[:3]  # Limit to first 3
                         }
+    _emit_progress(0.97)
 
     # FAST VECTORIZED CALCULATIONS - Handle different matching modes properly
     
@@ -977,6 +1004,8 @@ def calculate_similarity_vectorized(customer_texts, catalog_texts, customer_vect
         np.fill_diagonal(fuzzy_matrix, 0)
         np.fill_diagonal(gtin_matrix, 0)
         np.fill_diagonal(size_matrix, 0)
+
+    _emit_progress(1.0)
     
     return combined_matrix, tfidf_matrix, fuzzy_matrix, gtin_matrix, size_matrix, gtin_details
 

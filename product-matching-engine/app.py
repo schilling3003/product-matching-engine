@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import time
+import heapq
 from sklearn.feature_extraction.text import TfidfVectorizer
 from io import BytesIO
 
@@ -21,6 +22,45 @@ def _sanitize_for_streamlit(df: pd.DataFrame) -> pd.DataFrame:
                 lambda x: str(x) if isinstance(x, (dict, list, set, tuple)) else x
             )
     return safe_df
+
+
+def _get_process_memory_mb():
+    """Best-effort process memory in MB for lightweight diagnostics."""
+    try:
+        import os
+        import psutil
+
+        return psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+    except Exception:
+        return None
+
+
+def _limit_between_file_streaming_results(streaming_results, max_matches_per_product, progress_callback=None):
+    """Keep only top-k matches per customer from streaming tuple results."""
+    if not streaming_results or max_matches_per_product <= 0:
+        return streaming_results
+
+    top_k_heaps = {}
+    total = len(streaming_results)
+
+    for idx, rec in enumerate(streaming_results):
+        if progress_callback is not None and (idx % 5000 == 0 or idx == total - 1):
+            progress_callback((idx + 1) / total, idx + 1, total)
+
+        customer_idx = int(rec[0])
+        score = float(rec[2])
+        heap = top_k_heaps.setdefault(customer_idx, [])
+
+        if len(heap) < max_matches_per_product:
+            heapq.heappush(heap, (score, rec))
+        elif score > heap[0][0]:
+            heapq.heapreplace(heap, (score, rec))
+
+    limited_results = []
+    for heap in top_k_heaps.values():
+        limited_results.extend(rec for _, rec in sorted(heap, key=lambda x: x[0], reverse=True))
+
+    return limited_results
 
 def update_results_with_additional_columns(match_results, new_column_config, is_within_file):
     """Update existing results with additional columns without re-running matching."""
@@ -207,6 +247,8 @@ def main():
                 st.session_state.pop('match_results', None)
                 with st.spinner("Processing... this may take a moment for large files."):
                     start_time = time.time()
+                    phase_status = st.empty()
+                    phase_status.text("Stage 1/4: Cleaning and standardizing data...")
 
                     # --- Data Cleaning ---
                     cleaned_catalog_df = clean_and_standardize(catalog_df, column_config['catalog'], 
@@ -220,6 +262,7 @@ def main():
                     is_within_file = settings['matching_mode'] == "Find Similar Within File"
 
                     # --- Vectorization (only if text matching is enabled) ---
+                    phase_status.text("Stage 2/4: Building text vectors...")
                     if settings['enable_text_matching']:
                         vectorizer = TfidfVectorizer(stop_words='english' if settings['remove_stop_words'] else None)
                         all_texts = pd.concat([cleaned_catalog_df['combined_product_name'], cleaned_customer_df['combined_product_name']]).dropna()
@@ -232,6 +275,7 @@ def main():
                         customer_vectors = None
 
                     # --- Similarity Calculation ---
+                    phase_status.text("Stage 3/4: Calculating similarity...")
                     # Show status for similarity calculation on large jobs
                     status_placeholder = None
                     similarity_progress_bar = None
@@ -359,6 +403,7 @@ def main():
                         similarity_status_text.text("✅ Similarity calculation complete!")
 
                     # --- Results Processing ---
+                    phase_status.text("Stage 4/4: Building final results...")
                     results = []
                     results_df = pd.DataFrame()
                     selected_group_output_cols = column_config['customer'].get('output_cols', [])
@@ -368,6 +413,32 @@ def main():
                     # Check if we have streaming results
                     if streaming_results is not None:
                         print("📊 Converting streaming results to DataFrame...")
+                        # Between-files mode only needs top-k per customer in final output.
+                        # Limit before DataFrame expansion to avoid large post-similarity memory spikes.
+                        if not is_within_file:
+                            filter_progress = st.progress(0, text="Limiting to top matches per customer...")
+                            filter_status = st.empty()
+
+                            def filter_progress_callback(progress, current, total):
+                                filter_progress.progress(
+                                    progress,
+                                    text=f"Limiting to top matches per customer... {current:,} of {total:,}"
+                                )
+                                filter_status.text(f"Evaluated {current:,} of {total:,} potential matches")
+
+                            original_count = len(streaming_results)
+                            streaming_results = _limit_between_file_streaming_results(
+                                streaming_results,
+                                settings['max_matches_per_product'],
+                                progress_callback=filter_progress_callback
+                            )
+                            filter_progress.progress(1.0, text="Top-match filtering complete!")
+                            filter_status.text(
+                                f"✅ Kept {len(streaming_results):,} of {original_count:,} matches for conversion"
+                            )
+                            time.sleep(0.3)
+                            filter_status.empty()
+
                         show_streaming_progress = (not is_within_file) or (len(streaming_results) > 10000)
                         streaming_progress = None
                         streaming_status = None
@@ -699,6 +770,7 @@ def main():
                     
                     end_time = time.time()
                     processing_time = end_time - start_time
+                    phase_status.empty()
                     
                     st.success(f"✅ Matching complete in {processing_time:.2f} seconds!")
 
@@ -752,6 +824,16 @@ def main():
                             threshold_summary_df['Singletons'] = total_products - threshold_summary_df['Products in Groups']
 
                         # Persist everything needed for rendering into session_state
+                        dynamic_updates_available = (
+                            not use_grouping and
+                            streaming_results is not None and
+                            len(results_df) <= 100_000
+                        )
+
+                        mem_mb = _get_process_memory_mb()
+                        if mem_mb is not None:
+                            print(f"🧠 Memory before session persist: {mem_mb:.0f} MB")
+
                         st.session_state['match_results'] = {
                             'results_df': results_df,
                             'total_products': total_products,
@@ -769,13 +851,14 @@ def main():
                             'cleaned_product_df': cleaned_customer_df if use_grouping else None,
                             'selected_output_columns': selected_group_output_cols if use_grouping else [],
                             # Add data for dynamic column updates
-                            'raw_matches': streaming_results if streaming_results is not None else None,
-                            'customer_df': cleaned_customer_df,
-                            'catalog_df': cleaned_catalog_df,
+                            'raw_matches': streaming_results if dynamic_updates_available else None,
+                            'customer_df': cleaned_customer_df if dynamic_updates_available else None,
+                            'catalog_df': cleaned_catalog_df if dynamic_updates_available else None,
                             'column_config': column_config,
                             'settings': settings,
                             'size_matrix': size_matrix if 'size_matrix' in locals() else None,
-                            'gtin_details': gtin_details if gtin_details else {}
+                            'gtin_details': gtin_details if gtin_details else {},
+                            'dynamic_updates_available': dynamic_updates_available
                         }
                     else:
                         st.session_state['match_results'] = None
@@ -879,7 +962,7 @@ def main():
             col4.metric("Avg. Confidence", f"{avg_confidence:.2f}%")
 
         # --- Dynamic Column Updates ---
-        if not use_grouping:
+        if not use_grouping and match_results.get('dynamic_updates_available', False):
             with st.expander("🔄 Update Additional Columns", expanded=False):
                 st.write("Add more columns to your results without re-running the matching process.")
                 
