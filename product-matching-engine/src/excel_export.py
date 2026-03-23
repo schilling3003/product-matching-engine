@@ -194,35 +194,35 @@ def _write_groups_sheet(ws, groups_df, header_fill, header_font, border_thin):
         
         # Add conditional formatting for membership status
         for row_idx in range(6, last_row + 1):
-            # Active members (green)
+            # Active members at current threshold (green)
             ws.conditional_formatting.add(
                 f'A{row_idx}:{last_data_col_letter}{row_idx}',
                 FormulaRule(
-                    formula=[f'=${filter_col_letter}{row_idx}=1'],
+                    formula=[f'AND({threshold_col_letter}{row_idx}=Dashboard!$B$4, {in_group_col_letter}{row_idx}=TRUE)'],
                     stopIfTrue=True,
                     fill=PatternFill(start_color="E8F5E8", end_color="E8F5E8", fill_type="solid")
                 )
             )
             
-            # Inactive members at this threshold (light gray)
+            # Inactive members at current threshold (light gray) - members that dropped out
             ws.conditional_formatting.add(
                 f'A{row_idx}:{last_data_col_letter}{row_idx}',
                 FormulaRule(
-                    formula=[f'AND({threshold_col_letter}{row_idx}=Dashboard!$B$4, {filter_col_letter}{row_idx}=0)'],
+                    formula=[f'AND({threshold_col_letter}{row_idx}=Dashboard!$B$4, {in_group_col_letter}{row_idx}=FALSE)'],
                     stopIfTrue=True,
                     fill=PatternFill(start_color="F5F5F5", end_color="F5F5F5", fill_type="solid"),
                     font=Font(color="999999")
                 )
             )
             
-            # Members at other thresholds (very light gray)
+            # Hide rows from other thresholds completely (white text on white background)
             ws.conditional_formatting.add(
                 f'A{row_idx}:{last_data_col_letter}{row_idx}',
                 FormulaRule(
                     formula=[f'{threshold_col_letter}{row_idx}<>Dashboard!$B$4'],
                     stopIfTrue=True,
-                    fill=PatternFill(start_color="FAFAFA", end_color="FAFAFA", fill_type="solid"),
-                    font=Font(color="CCCCCC")
+                    fill=PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid"),
+                    font=Font(color="FFFFFF")
                 )
             )
         
