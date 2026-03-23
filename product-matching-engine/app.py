@@ -22,6 +22,77 @@ def _sanitize_for_streamlit(df: pd.DataFrame) -> pd.DataFrame:
             )
     return safe_df
 
+def update_results_with_additional_columns(match_results, new_column_config, is_within_file):
+    """Update existing results with additional columns without re-running matching."""
+    if not match_results or 'raw_matches' not in match_results:
+        return match_results['results_df']
+    
+    raw_matches = match_results['raw_matches']
+    customer_df = match_results['customer_df']
+    catalog_df = match_results['catalog_df']
+    settings = match_results.get('settings', {})
+    
+    customer_display_col = match_results['column_config']['customer']['product_cols'][0]
+    catalog_display_col = match_results['column_config']['catalog']['product_cols'][0]
+    
+    # Get new output columns
+    new_customer_out_cols = new_column_config.get('customer', {}).get('output_cols', [])
+    new_catalog_out_cols = new_column_config.get('catalog', {}).get('output_cols', [])
+    
+    # Build new results DataFrame
+    rows = []
+    for idx, rec in enumerate(raw_matches):
+        # Handle both old format (6 elements) and new format (7 elements with size)
+        if len(rec) == 7:
+            i, j, combined, tfidf_s, fuzzy_s, gtin_s, size_s = rec
+        else:
+            i, j, combined, tfidf_s, fuzzy_s, gtin_s = rec
+            size_s = 0
+        
+        if is_within_file:
+            entry = {
+                'Product 1': customer_df.iloc[i][customer_display_col],
+                'Product 2': catalog_df.iloc[j][catalog_display_col],
+                'Confidence Score': f"{combined:.2f}%",
+                'TF-IDF Score': f"{tfidf_s:.2f}%",
+                'Fuzzy Score': f"{fuzzy_s:.2f}%",
+            }
+        else:
+            entry = {
+                'Customer Product': customer_df.iloc[i][customer_display_col],
+                'Catalog Product': catalog_df.iloc[j][catalog_display_col],
+                'Confidence Score': f"{combined:.2f}%",
+                'TF-IDF Score': f"{tfidf_s:.2f}%",
+                'Fuzzy Score': f"{fuzzy_s:.2f}%",
+            }
+        
+        # Add GTIN details if available
+        if gtin_s > 0:
+            entry['GTIN Score'] = f"{gtin_s:.2f}%"
+        
+        # Add size details if available
+        if settings.get('size_weight', 0) > 0 and size_s > 0:
+            entry['Size Score'] = f"{size_s:.2f}%"
+            customer_size = customer_df.iloc[i].get('standardized_size', '')
+            catalog_size = catalog_df.iloc[j].get('standardized_size', '')
+            if customer_size and catalog_size:
+                entry[f'Product 1 Size' if is_within_file else 'Customer Size'] = customer_size
+                entry[f'Product 2 Size' if is_within_file else 'Catalog Size'] = catalog_size
+        
+        # Add new customer columns
+        for col in new_customer_out_cols:
+            if col in customer_df.columns:
+                entry[f'Product 1 {col}' if is_within_file else f'Customer {col}'] = customer_df.iloc[i][col]
+        
+        # Add new catalog columns
+        for col in new_catalog_out_cols:
+            if col in catalog_df.columns:
+                entry[f'Product 2 {col}' if is_within_file else f'Catalog {col}'] = catalog_df.iloc[j][col]
+        
+        rows.append(entry)
+    
+    return pd.DataFrame(rows)
+
 def convert_streaming_results_to_dataframe(streaming_results, cleaned_customer_df, cleaned_catalog_df,
                                          column_config, is_within_file, settings, gtin_details=None):
     """Convert chunked extraction results (list of tuples) to the expected DataFrame format."""
@@ -34,8 +105,13 @@ def convert_streaming_results_to_dataframe(streaming_results, cleaned_customer_d
     catalog_out_cols = column_config['catalog'].get('output_cols', [])
 
     rows = []
-    for rec in streaming_results:
-        i, j, combined, tfidf_s, fuzzy_s, gtin_s = rec
+    for idx, rec in enumerate(streaming_results):
+        # Handle both old format (6 elements) and new format (7 elements with size)
+        if len(rec) == 7:
+            i, j, combined, tfidf_s, fuzzy_s, gtin_s, size_s = rec
+        else:
+            i, j, combined, tfidf_s, fuzzy_s, gtin_s = rec
+            size_s = 0
 
         if is_within_file:
             entry = {
@@ -60,6 +136,16 @@ def convert_streaming_results_to_dataframe(streaming_results, cleaned_customer_d
             d = gtin_details[(i, j)]
             entry['GTIN Match Type'] = d['match_type']
             entry['Matching GTINs'] = ', '.join(d['matching_gtins'][:3])
+
+        # Add size match details if size matching is enabled
+        if settings.get('size_weight', 0) > 0 and size_s > 0:
+            entry['Size Score'] = f"{size_s:.2f}%"
+            # Add standardized sizes for reference
+            customer_size = cleaned_customer_df.iloc[i].get('standardized_size', '')
+            catalog_size = cleaned_catalog_df.iloc[j].get('standardized_size', '')
+            if customer_size and catalog_size:
+                entry[f'Product 1 Size' if is_within_file else 'Customer Size'] = customer_size
+                entry[f'Product 2 Size' if is_within_file else 'Catalog Size'] = catalog_size
 
         for col in customer_out_cols:
             if col in cleaned_customer_df.columns:
@@ -221,7 +307,7 @@ def main():
                     else:
                         # Use original vectorized calculation for smaller datasets
                         from src.processing import calculate_similarity_vectorized
-                        combined_matrix, tfidf_matrix, fuzzy_matrix, gtin_matrix, gtin_details = calculate_similarity_vectorized(
+                        combined_matrix, tfidf_matrix, fuzzy_matrix, gtin_matrix, size_matrix, gtin_details = calculate_similarity_vectorized(
                             customer_texts=cleaned_customer_df['combined_product_name'].fillna('').tolist(),
                             catalog_texts=cleaned_catalog_df['combined_product_name'].fillna('').tolist(),
                             customer_vectors=customer_vectors,
@@ -412,7 +498,47 @@ def main():
                                                     'Fuzzy Score': f"{fuzzy_matrix[i, j]:.2f}%"
                                                 }
                                             
-                                            # Skip GTIN and additional columns for speed in large datasets
+                                            # Add GTIN score if GTIN matching is enabled
+                                            if settings['enable_gtin_matching']:
+                                                gtin_score = gtin_matrix[i, j]
+                                                result_entry['GTIN Score'] = f"{gtin_score:.2f}%"
+                                                
+                                                # Add GTIN match details if available
+                                                if (i, j) in gtin_details:
+                                                    details = gtin_details[(i, j)]
+                                                    result_entry['GTIN Match Type'] = details['match_type']
+                                                    result_entry['Matching GTINs'] = ', '.join(details['matching_gtins'][:3])  # Limit to first 3
+                                            
+                                            # Add size score if size matching is enabled
+                                            if settings.get('size_weight', 0) > 0:
+                                                size_score = size_matrix[i, j]
+                                                if size_score > 0:
+                                                    result_entry['Size Score'] = f"{size_score:.2f}%"
+                                                    # Add standardized sizes for reference
+                                                    customer_size = cleaned_customer_df.iloc[i].get('standardized_size', '')
+                                                    catalog_size = cleaned_catalog_df.iloc[j].get('standardized_size', '')
+                                                    if customer_size and catalog_size:
+                                                        result_entry[f'Product 1 Size' if is_within_file else 'Customer Size'] = customer_size
+                                                        result_entry[f'Product 2 Size' if is_within_file else 'Catalog Size'] = catalog_size
+                                            
+                                            # Add additional customer columns if selected
+                                            if column_config['customer']['output_cols']:
+                                                for col in column_config['customer']['output_cols']:
+                                                    if col in original_customer_row.index:
+                                                        if is_within_file:
+                                                            result_entry[f'Product 1 {col}'] = original_customer_row[col]
+                                                        else:
+                                                            result_entry[f'Customer {col}'] = original_customer_row[col]
+                                            
+                                            # Add additional catalog columns if selected
+                                            if column_config['catalog']['output_cols']:
+                                                for col in column_config['catalog']['output_cols']:
+                                                    if col in original_catalog_row.index:
+                                                        if is_within_file:
+                                                            result_entry[f'Product 2 {col}'] = original_catalog_row[col]
+                                                        else:
+                                                            result_entry[f'Catalog {col}'] = original_catalog_row[col]
+                                            
                                             results.append(result_entry)
                                 
                                 # Complete the progress bar
@@ -498,6 +624,18 @@ def main():
                                                     details = gtin_details[(i, j)]
                                                     result_entry['GTIN Match Type'] = details['match_type']
                                                     result_entry['Matching GTINs'] = ', '.join(details['matching_gtins'][:3])  # Limit to first 3
+                                            
+                                            # Add size score if size matching is enabled
+                                            if settings.get('size_weight', 0) > 0:
+                                                size_score = size_matrix[i, j]
+                                                if size_score > 0:
+                                                    result_entry['Size Score'] = f"{size_score:.2f}%"
+                                                    # Add standardized sizes for reference
+                                                    customer_size = cleaned_customer_df.iloc[i].get('standardized_size', '')
+                                                    catalog_size = cleaned_catalog_df.iloc[j].get('standardized_size', '')
+                                                    if customer_size and catalog_size:
+                                                        result_entry[f'Product 1 Size' if is_within_file else 'Customer Size'] = customer_size
+                                                        result_entry[f'Product 2 Size' if is_within_file else 'Catalog Size'] = catalog_size
                                             
                                             # Add additional customer columns if selected
                                             if column_config['customer']['output_cols']:
@@ -599,6 +737,14 @@ def main():
                             'product_names': product_names if use_grouping else None,
                             'cleaned_product_df': cleaned_customer_df if use_grouping else None,
                             'selected_output_columns': selected_group_output_cols if use_grouping else [],
+                            # Add data for dynamic column updates
+                            'raw_matches': streaming_results if streaming_results is not None else None,
+                            'customer_df': cleaned_customer_df,
+                            'catalog_df': cleaned_catalog_df,
+                            'column_config': column_config,
+                            'settings': settings,
+                            'size_matrix': size_matrix if 'size_matrix' in locals() else None,
+                            'gtin_details': gtin_details if gtin_details else {}
                         }
                     else:
                         st.session_state['match_results'] = None
@@ -697,21 +843,76 @@ def main():
             
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Total Products", f"{total_products}")
-            col2.metric("Unique Similar Pairs", f"{len(unique_pairs)}")
-            col3.metric("Total Matches", f"{total_matches}")
-            col4.metric("Avg. Confidence", f"{avg_confidence:.2f}%")
-        else:
-            products_with_matches = current_results_df['Customer Product'].nunique()
-            total_matches = len(current_results_df)
-            avg_confidence = pd.to_numeric(current_results_df['Confidence Score'].str.replace('%', '')).mean()
-            
-            st.write(f"Found **{total_matches} matches** for **{products_with_matches}** customer products out of {total_products} total products.")
-            
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Total Customer Products", f"{total_products}")
             col2.metric("Products with Matches", f"{products_with_matches}")
             col3.metric("Total Matches Found", f"{total_matches}")
             col4.metric("Avg. Confidence", f"{avg_confidence:.2f}%")
+
+        # --- Dynamic Column Updates ---
+        if not use_grouping:
+            with st.expander("🔄 Update Additional Columns", expanded=False):
+                st.write("Add more columns to your results without re-running the matching process.")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Get available customer columns
+                    customer_cols = list(match_results['customer_df'].columns)
+                    current_customer_cols = match_results['column_config']['customer'].get('output_cols', [])
+                    new_customer_cols = st.multiselect(
+                        "Additional Customer Columns" if not is_within_file else "Additional Product Columns",
+                        [col for col in customer_cols if col not in current_customer_cols],
+                        key="update_customer_cols"
+                    )
+                
+                with col2:
+                    # Get available catalog columns
+                    catalog_cols = list(match_results['catalog_df'].columns)
+                    current_catalog_cols = match_results['column_config']['catalog'].get('output_cols', [])
+                    new_catalog_cols = st.multiselect(
+                        "Additional Catalog Columns" if not is_within_file else "Additional Product Columns (for Product 2)",
+                        [col for col in catalog_cols if col not in current_catalog_cols],
+                        key="update_catalog_cols"
+                    )
+                
+                if st.button("Update Results", key="update_results_btn"):
+                    if new_customer_cols or new_catalog_cols:
+                        with st.spinner("Updating results..."):
+                            # Create new column config
+                            updated_config = {
+                                'customer': {
+                                    'output_cols': current_customer_cols + new_customer_cols
+                                },
+                                'catalog': {
+                                    'output_cols': current_catalog_cols + new_catalog_cols
+                                }
+                            }
+                            
+                            # Update results with new columns
+                            if match_results.get('raw_matches') is not None:
+                                # Use the efficient update function for streaming results
+                                updated_df = update_results_with_additional_columns(
+                                    match_results, updated_config, is_within_file
+                                )
+                            else:
+                                # For non-streaming results, we need to rebuild from matrices
+                                st.info("Rebuilding results with additional columns...")
+                                # This would require rebuilding from matrices - for now show a message
+                                st.warning("Dynamic column updates are only available for streaming results. Please re-run the matching with the desired columns.")
+                                updated_df = current_results_df
+                            
+                            if updated_df is not None and updated_df != current_results_df:
+                                # Update session state
+                                st.session_state['match_results']['results_df'] = updated_df
+                                st.session_state['match_results']['column_config']['customer']['output_cols'] = updated_config['customer']['output_cols']
+                                st.session_state['match_results']['column_config']['catalog']['output_cols'] = updated_config['catalog']['output_cols']
+                                
+                                # Update current_results_df for display
+                                current_results_df = updated_df
+                                
+                                st.success(f"Added {len(new_customer_cols)} customer and {len(new_catalog_cols)} catalog columns!")
+                                st.rerun()
+                    else:
+                        st.warning("Please select at least one additional column.")
 
         st.dataframe(current_results_df)
 

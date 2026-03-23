@@ -247,7 +247,7 @@ def _chunked_extract_results(customer_texts, catalog_texts, customer_vectors, ca
     print(f"🔄 Chunked extraction: {n_customers:,} products in chunks of {chunk_size:,}")
 
     # Accumulate only the sparse results, not full matrices
-    match_results = []   # list of (i, j, combined, tfidf, fuzzy, gtin) tuples
+    match_results = []   # list of (i, j, combined, tfidf, fuzzy, gtin, size) tuples
     gtin_details = {}
 
     for chunk_start in range(0, n_customers, chunk_size):
@@ -355,7 +355,8 @@ def _chunked_extract_results(customer_texts, catalog_texts, customer_vectors, ca
                 float(chunk_combined[i_local, j]),
                 float(chunk_tfidf[i_local, j]),
                 float(chunk_fuzzy[i_local, j]),
-                float(chunk_gtin[i_local, j])
+                float(chunk_gtin[i_local, j]),
+                float(chunk_size_mat[i_local, j])
             ))
             if (i_local, j) in chunk_gtin_details:
                 gtin_details[(i_global, int(j))] = chunk_gtin_details[(i_local, j)]
@@ -975,8 +976,9 @@ def calculate_similarity_vectorized(customer_texts, catalog_texts, customer_vect
         np.fill_diagonal(tfidf_matrix, 0)
         np.fill_diagonal(fuzzy_matrix, 0)
         np.fill_diagonal(gtin_matrix, 0)
+        np.fill_diagonal(size_matrix, 0)
     
-    return combined_matrix, tfidf_matrix, fuzzy_matrix, gtin_matrix, gtin_details
+    return combined_matrix, tfidf_matrix, fuzzy_matrix, gtin_matrix, size_matrix, gtin_details
 
 def _get_gtin_confidence(cust_src, cat_src):
     """Helper function to determine GTIN match confidence based on source types."""
