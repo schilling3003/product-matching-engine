@@ -256,6 +256,7 @@ def main():
                     # Use memory-efficient calculation for large datasets
                     streaming_results = None
                     restriction_data = None
+                    size_matrix = None
                     
                     # Prepare restriction data for processing
                     if is_within_file and settings.get('restrict_matches') and settings.get('selected_restrictions'):
@@ -298,12 +299,27 @@ def main():
                             restriction_data=restriction_data
                         )
                         
-                        # Check if streaming was used (returns 6 items instead of 5)
+                        # Handle all result shapes returned by processing layer.
+                        # NOTE: both vectorized and streaming paths can return 6 items,
+                        # but with different structures.
                         if len(result) == 6:
-                            combined_matrix, tfidf_matrix, fuzzy_matrix, gtin_matrix, gtin_details, streaming_results = result
-                            print(f"📊 Processing {len(streaming_results):,} streamed matches")
-                        else:
+                            # Streaming/chunked extraction format:
+                            # (combined, tfidf, fuzzy, gtin, gtin_details, streaming_results)
+                            if isinstance(result[4], dict) and isinstance(result[5], list):
+                                combined_matrix, tfidf_matrix, fuzzy_matrix, gtin_matrix, gtin_details, streaming_results = result
+                                print(f"📊 Processing {len(streaming_results):,} streamed matches")
+                            # Vectorized format:
+                            # (combined, tfidf, fuzzy, gtin, size_matrix, gtin_details)
+                            elif isinstance(result[4], np.ndarray) and isinstance(result[5], dict):
+                                combined_matrix, tfidf_matrix, fuzzy_matrix, gtin_matrix, size_matrix, gtin_details = result
+                            else:
+                                raise ValueError("Unexpected 6-value similarity result format")
+                        elif len(result) == 5:
+                            # Legacy non-size format:
+                            # (combined, tfidf, fuzzy, gtin, gtin_details)
                             combined_matrix, tfidf_matrix, fuzzy_matrix, gtin_matrix, gtin_details = result
+                        else:
+                            raise ValueError(f"Unexpected similarity result length: {len(result)}")
                     else:
                         # Use original vectorized calculation for smaller datasets
                         from src.processing import calculate_similarity_vectorized
