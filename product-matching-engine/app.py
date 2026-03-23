@@ -658,7 +658,18 @@ def main():
                                     results_progress_bar = st.progress(0, text="Processing matches...")
                                     results_status_text = st.empty()
                                 
-                                for i, customer_row in cleaned_customer_df.iterrows():
+                                # Pre-fetch columns for fast access
+                                customer_display_col = column_config['customer']['product_cols'][0]
+                                catalog_display_col = column_config['catalog']['product_cols'][0]
+                                
+                                cust_display_vals = cleaned_customer_df[customer_display_col].values
+                                cat_display_vals = cleaned_catalog_df[catalog_display_col].values
+                                
+                                threshold = settings['similarity_threshold']
+                                max_matches = settings['max_matches_per_product']
+                                has_restrictions = is_within_file and settings.get('restrict_matches') and settings.get('selected_restrictions')
+                                
+                                for i in range(len(cleaned_customer_df)):
                                     # Update progress bar for medium datasets
                                     if results_progress_bar is not None and i % 100 == 0:
                                         progress = (i + 1) / len(cleaned_customer_df)
@@ -666,7 +677,21 @@ def main():
                                         results_status_text.text(f"Processing product {i+1:,} of {len(cleaned_customer_df):,}")
                                     
                                     scores = combined_matrix[i]
-                                    top_indices = scores.argsort()[-settings['max_matches_per_product']:][::-1]
+                                    
+                                    # Fast path: find indices above threshold
+                                    above_threshold = np.where(scores >= threshold)[0]
+                                    if len(above_threshold) == 0:
+                                        continue
+                                        
+                                    # Get top matches efficiently
+                                    top_n = min(max_matches, len(above_threshold))
+                                    if top_n < len(above_threshold):
+                                        partitioned_idx = np.argpartition(scores[above_threshold], -top_n)[-top_n:]
+                                        top_indices = above_threshold[partitioned_idx]
+                                        # Sort the top-n subset
+                                        top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
+                                    else:
+                                        top_indices = above_threshold[np.argsort(scores[above_threshold])[::-1]]
                                     
                                     for j in top_indices:
                                         score = scores[j]
@@ -675,7 +700,7 @@ def main():
                                             continue
                                         
                                         # Apply restriction filters if enabled
-                                        if is_within_file and settings.get('restrict_matches') and settings.get('selected_restrictions'):
+                                        if has_restrictions:
                                             skip_match = False
                                             for restriction_col in settings['selected_restrictions']:
                                                 if restriction_col in customer_df.columns and restriction_col in catalog_df.columns:
@@ -688,33 +713,28 @@ def main():
                                             if skip_match:
                                                 continue
                                             
-                                        if score >= settings['similarity_threshold']:
-                                            # Use the first selected product column for display
-                                            customer_display_col = column_config['customer']['product_cols'][0]
-                                            catalog_display_col = column_config['catalog']['product_cols'][0]
-                                            
-                                            # Get the original rows for additional columns
-                                            original_customer_row = customer_df.iloc[i]
-                                            original_catalog_row = catalog_df.iloc[j]
+                                        # Get the original rows for additional columns
+                                        original_customer_row = customer_df.iloc[i]
+                                        original_catalog_row = catalog_df.iloc[j]
 
-                                            if is_within_file:
-                                                # For within-file mode, show Product 1 and Product 2
-                                                result_entry = {
-                                                    'Product 1': customer_row[customer_display_col],
-                                                    'Product 2': cleaned_catalog_df.iloc[j][catalog_display_col],
-                                                    'Confidence Score': f"{score:.2f}%",
-                                                    'TF-IDF Score': f"{tfidf_matrix[i, j]:.2f}%",
-                                                    'Fuzzy Score': f"{fuzzy_matrix[i, j]:.2f}%"
-                                                }
-                                            else:
-                                                # Original two-file mode
-                                                result_entry = {
-                                                    'Customer Product': customer_row[customer_display_col],
-                                                    'Catalog Product': cleaned_catalog_df.iloc[j][catalog_display_col],
-                                                    'Confidence Score': f"{score:.2f}%",
-                                                    'TF-IDF Score': f"{tfidf_matrix[i, j]:.2f}%",
-                                                    'Fuzzy Score': f"{fuzzy_matrix[i, j]:.2f}%"
-                                                }
+                                        if is_within_file:
+                                            # For within-file mode, show Product 1 and Product 2
+                                            result_entry = {
+                                                'Product 1': cust_display_vals[i],
+                                                'Product 2': cat_display_vals[j],
+                                                'Confidence Score': f"{score:.2f}%",
+                                                'TF-IDF Score': f"{tfidf_matrix[i, j]:.2f}%",
+                                                'Fuzzy Score': f"{fuzzy_matrix[i, j]:.2f}%"
+                                            }
+                                        else:
+                                            # Original two-file mode
+                                            result_entry = {
+                                                'Customer Product': cust_display_vals[i],
+                                                'Catalog Product': cat_display_vals[j],
+                                                'Confidence Score': f"{score:.2f}%",
+                                                'TF-IDF Score': f"{tfidf_matrix[i, j]:.2f}%",
+                                                'Fuzzy Score': f"{fuzzy_matrix[i, j]:.2f}%"
+                                            }
                                             
                                             # Add GTIN score if GTIN matching is enabled
                                             if settings['enable_gtin_matching']:
