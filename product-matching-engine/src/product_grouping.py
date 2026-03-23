@@ -217,6 +217,102 @@ def _conservative_split_groups(similarity_matrix: np.ndarray,
     return refined_groups
 
 
+def compute_group_evolution(similarity_matrix: np.ndarray,
+                           product_names: List[str],
+                           thresholds: List[int],
+                           min_group_size: int = 2) -> pd.DataFrame:
+    """
+    Compute how groups evolve across different similarity thresholds.
+    
+    Groups are established at the lowest threshold and then tracked
+    as members drop out at higher thresholds.
+    
+    Args:
+        similarity_matrix: NxN matrix of similarity scores
+        product_names: List of product names
+        thresholds: List of thresholds to analyze (ascending)
+        min_group_size: Minimum group size to track
+        
+    Returns:
+        DataFrame with evolution tracking data
+    """
+    # Sort thresholds to ensure ascending order
+    thresholds = sorted(thresholds)
+    lowest_threshold = thresholds[0]
+    
+    # Find groups at the lowest threshold
+    base_groups = find_product_groups(similarity_matrix, lowest_threshold, method='union_find')
+    
+    # Filter by minimum size
+    base_groups = [g for g in base_groups if len(g) >= min_group_size]
+    
+    # Find representatives for each group
+    group_representatives = {}
+    for i, group in enumerate(base_groups):
+        rep_idx = _find_representative(similarity_matrix, group)
+        group_representatives[f'G{i+1:03d}'] = {
+            'members': set(group),
+            'representative': rep_idx,
+            'representative_name': product_names[rep_idx]
+        }
+    
+    # Track evolution across thresholds
+    evolution_data = []
+    
+    for threshold in thresholds:
+        for group_id, group_info in group_representatives.items():
+            rep_idx = group_info['representative']
+            original_members = group_info['members']
+            
+            # Check which members are still in the group at this threshold
+            current_members = []
+            similarities = []
+            
+            for member_idx in original_members:
+                # Member stays if similarity to representative >= threshold
+                if similarity_matrix[rep_idx][member_idx] >= threshold:
+                    current_members.append(member_idx)
+                    similarities.append(similarity_matrix[rep_idx][member_idx])
+            
+            # Only include if group still meets minimum size
+            if len(current_members) >= min_group_size:
+                min_similarity = min(similarities) if similarities else 0
+                avg_similarity = sum(similarities) / len(similarities) if similarities else 0
+                
+                # Add row for each current member
+                for member_idx in current_members:
+                    evolution_data.append({
+                        'Group ID': group_id,
+                        'Group Summary': group_info['representative_name'],
+                        'Threshold': threshold,
+                        'Product Name': product_names[member_idx],
+                        'Is Representative': member_idx == rep_idx,
+                        'Similarity to Representative': similarity_matrix[rep_idx][member_idx],
+                        'Group Size at Threshold': len(current_members),
+                        'Group Min Similarity': round(min_similarity, 2),
+                        'Group Avg Similarity': round(avg_similarity, 2),
+                        'In Group': True
+                })
+                
+                # Add rows for members that dropped out (for comparison)
+                dropped_members = original_members - set(current_members)
+                for member_idx in dropped_members:
+                    evolution_data.append({
+                        'Group ID': group_id,
+                        'Group Summary': group_info['representative_name'],
+                        'Threshold': threshold,
+                        'Product Name': product_names[member_idx],
+                        'Is Representative': member_idx == rep_idx,
+                        'Similarity to Representative': similarity_matrix[rep_idx][member_idx],
+                        'Group Size at Threshold': len(current_members),
+                        'Group Min Similarity': round(min_similarity, 2),
+                        'Group Avg Similarity': round(avg_similarity, 2),
+                        'In Group': False
+                    })
+    
+    return pd.DataFrame(evolution_data)
+
+
 def _find_representative(similarity_matrix: np.ndarray, group: List[int]) -> int:
     """
     Find the most representative product in a group based on centrality.

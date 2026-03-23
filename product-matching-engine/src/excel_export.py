@@ -112,16 +112,25 @@ def _write_summary_sheet(ws, summary_df, header_fill, header_font, border_thin):
 
 
 def _write_groups_sheet(ws, groups_df, header_fill, header_font, border_thin):
-    """Write the Groups sheet with dynamic threshold filtering."""
+    """Write the Groups sheet with dynamic threshold filtering and evolution tracking."""
+    # Check if this is evolution data (has 'In Group' column)
+    is_evolution_data = 'In Group' in groups_df.columns
+    
     # Write title
-    ws['A1'] = "Group Membership - Filtered by Threshold"
+    title = "Group Evolution - Track Membership Across Thresholds" if is_evolution_data else "Group Membership - Filtered by Threshold"
+    ws['A1'] = title
     ws['A1'].font = Font(bold=True, size=14)
     ws.merge_cells('A1:H1')
     
     # Instructions
-    ws['A2'] = "Groups automatically filter based on threshold selected in Dashboard sheet"
-    ws['A2'].font = Font(italic=True, size=10)
-    ws.merge_cells('A2:H2')
+    if is_evolution_data:
+        ws['A2'] = "See how individual groups evolve as threshold changes - members drop out but groups persist"
+        ws['A2'].font = Font(italic=True, size=10)
+        ws.merge_cells('A2:H2')
+    else:
+        ws['A2'] = "Groups automatically filter based on threshold selected in Dashboard sheet"
+        ws['A2'].font = Font(italic=True, size=10)
+        ws.merge_cells('A2:H2')
     
     # Threshold display (linked to Dashboard)
     ws['A3'] = "Current Threshold:"
@@ -146,48 +155,114 @@ def _write_groups_sheet(ws, groups_df, header_fill, header_font, border_thin):
             cell.border = border_thin
     
     # Add dynamic filtering using Excel formulas
-    # Create a helper column that checks if row matches selected threshold
     last_row = len(groups_df) + 5
-    ws['H5'] = "Filter"
-    ws['H5'].fill = header_fill
-    ws['H5'].font = header_font
-    ws['H5'].alignment = Alignment(horizontal='center', vertical='center')
     
-    # Add filter formula to all data rows
-    for row_idx in range(6, last_row + 1):
-        ws[f'H{row_idx}'] = f'=IF(A{row_idx}=Dashboard!$B$4, 1, 0)'
-    
-    # Add conditional formatting to highlight visible rows
-    for row_idx in range(6, last_row + 1):
-        # Highlight rows that match the threshold
-        ws.conditional_formatting.add(
-            f'A{row_idx}:G{row_idx}',
-            FormulaRule(
-                formula=[f'=$H{row_idx}=1'],
-                stopIfTrue=True,
-                fill=PatternFill(start_color="E8F5E8", end_color="E8F5E8", fill_type="solid")
-            )
-        )
+    if is_evolution_data:
+        # For evolution data, filter by both threshold and membership status
+        ws['I5'] = "Filter"
+        ws['I5'].fill = header_fill
+        ws['I5'].font = header_font
+        ws['I5'].alignment = Alignment(horizontal='center', vertical='center')
         
-        # Dim rows that don't match
-        ws.conditional_formatting.add(
-            f'A{row_idx}:G{row_idx}',
-            FormulaRule(
-                formula=[f'=$H{row_idx}=0'],
-                stopIfTrue=True,
-                fill=PatternFill(start_color="F5F5F5", end_color="F5F5F5", fill_type="solid"),
-                font=Font(color="999999")
+        # Add filter formula to all data rows
+        for row_idx in range(6, last_row + 1):
+            # Check if threshold matches AND product is in group
+            # Column H contains 'In Group' values (TRUE/FALSE)
+            ws[f'I{row_idx}'] = f'=IF(AND(C{row_idx}=Dashboard!$B$4, H{row_idx}=TRUE), 1, 0)'
+        
+        # Add conditional formatting for membership status
+        for row_idx in range(6, last_row + 1):
+            # Active members (green)
+            ws.conditional_formatting.add(
+                f'A{row_idx}:H{row_idx}',
+                FormulaRule(
+                    formula=[f'=$I{row_idx}=1'],
+                    stopIfTrue=True,
+                    fill=PatternFill(start_color="E8F5E8", end_color="E8F5E8", fill_type="solid")
+                )
             )
-        )
-    
-    # Add count of visible groups
-    ws['D3'] = "Groups at this Threshold:"
-    ws['D3'].font = Font(bold=True, size=11)
-    ws['E3'] = f'=COUNTIF(H6:H{last_row}, 1)'
-    ws['E3'].font = Font(bold=True, size=11, color="4472C4")
-    ws['E3'].fill = PatternFill(start_color="E7E6E6", end_color="E7E6E6", fill_type="solid")
-    ws['E3'].border = border_thin
-    ws['E3'].alignment = Alignment(horizontal='center', vertical='center')
+            
+            # Inactive members at this threshold (light gray)
+            ws.conditional_formatting.add(
+                f'A{row_idx}:H{row_idx}',
+                FormulaRule(
+                    formula=[f'AND(C{row_idx}=Dashboard!$B$4, I{row_idx}=0)'],
+                    stopIfTrue=True,
+                    fill=PatternFill(start_color="F5F5F5", end_color="F5F5F5", fill_type="solid"),
+                    font=Font(color="999999")
+                )
+            )
+            
+            # Members at other thresholds (very light gray)
+            ws.conditional_formatting.add(
+                f'A{row_idx}:H{row_idx}',
+                FormulaRule(
+                    formula=[f'C{row_idx}<>Dashboard!$B$4'],
+                    stopIfTrue=True,
+                    fill=PatternFill(start_color="FAFAFA", end_color="FAFAFA", fill_type="solid"),
+                    font=Font(color="CCCCCC")
+                )
+            )
+        
+        # Add count of active members
+        ws['D3'] = "Active Members:"
+        ws['D3'].font = Font(bold=True, size=11)
+        ws['E3'] = f'=COUNTIFS(I6:I{last_row}, 1)'
+        ws['E3'].font = Font(bold=True, size=11, color="4472C4")
+        ws['E3'].fill = PatternFill(start_color="E7E6E6", end_color="E7E6E6", fill_type="solid")
+        ws['E3'].border = border_thin
+        ws['E3'].alignment = Alignment(horizontal='center', vertical='center')
+        
+        # Hide the filter column
+        ws.column_dimensions['I'].width = 5
+        ws.column_dimensions['I'].hidden = True
+        
+    else:
+        # Original filtering logic for non-evolution data
+        ws['H5'] = "Filter"
+        ws['H5'].fill = header_fill
+        ws['H5'].font = header_font
+        ws['H5'].alignment = Alignment(horizontal='center', vertical='center')
+        
+        # Add filter formula to all data rows
+        for row_idx in range(6, last_row + 1):
+            ws[f'H{row_idx}'] = f'=IF(A{row_idx}=Dashboard!$B$4, 1, 0)'
+        
+        # Add conditional formatting to highlight visible rows
+        for row_idx in range(6, last_row + 1):
+            # Highlight rows that match the threshold
+            ws.conditional_formatting.add(
+                f'A{row_idx}:G{row_idx}',
+                FormulaRule(
+                    formula=[f'=$H{row_idx}=1'],
+                    stopIfTrue=True,
+                    fill=PatternFill(start_color="E8F5E8", end_color="E8F5E8", fill_type="solid")
+                )
+            )
+            
+            # Dim rows that don't match
+            ws.conditional_formatting.add(
+                f'A{row_idx}:G{row_idx}',
+                FormulaRule(
+                    formula=[f'=$H{row_idx}=0'],
+                    stopIfTrue=True,
+                    fill=PatternFill(start_color="F5F5F5", end_color="F5F5F5", fill_type="solid"),
+                    font=Font(color="999999")
+                )
+            )
+        
+        # Add count of visible groups
+        ws['D3'] = "Groups at this Threshold:"
+        ws['D3'].font = Font(bold=True, size=11)
+        ws['E3'] = f'=COUNTIF(H6:H{last_row}, 1)'
+        ws['E3'].font = Font(bold=True, size=11, color="4472C4")
+        ws['E3'].fill = PatternFill(start_color="E7E6E6", end_color="E7E6E6", fill_type="solid")
+        ws['E3'].border = border_thin
+        ws['E3'].alignment = Alignment(horizontal='center', vertical='center')
+        
+        # Set column H (filter) to be narrow and hide it
+        ws.column_dimensions['H'].width = 5
+        ws.column_dimensions['H'].hidden = True
     
     # Auto-size columns
     for column_cells in ws.columns:
@@ -205,10 +280,6 @@ def _write_groups_sheet(ws, groups_df, header_fill, header_font, border_thin):
         if column_letter:
             adjusted_width = min(max_length + 2, 40)
             ws.column_dimensions[column_letter].width = adjusted_width
-    
-    # Set column H (filter) to be narrow and hide it
-    ws.column_dimensions['H'].width = 5
-    ws.column_dimensions['H'].hidden = True
     
     # Freeze header row
     ws.freeze_panes = 'A6'
