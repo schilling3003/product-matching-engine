@@ -124,12 +124,12 @@ def _write_groups_sheet(ws, groups_df, header_fill, header_font, border_thin):
     
     # Instructions
     if is_evolution_data:
-        ws['A2'] = "See how individual groups evolve as threshold changes - members drop out but groups persist"
-        ws['A2'].font = Font(italic=True, size=10)
+        ws['A2'] = "Use the Threshold column filter to show only the threshold you selected in Dashboard"
+        ws['A2'].font = Font(italic=True, size=10, color="FF0000")
         ws.merge_cells('A2:H2')
     else:
-        ws['A2'] = "Groups automatically filter based on threshold selected in Dashboard sheet"
-        ws['A2'].font = Font(italic=True, size=10)
+        ws['A2'] = "Use the Threshold column filter to show only the threshold you selected in Dashboard"
+        ws['A2'].font = Font(italic=True, size=10, color="FF0000")
         ws.merge_cells('A2:H2')
     
     # Threshold display (linked to Dashboard)
@@ -302,6 +302,13 @@ def _write_groups_sheet(ws, groups_df, header_fill, header_font, border_thin):
         if column_letter:
             adjusted_width = min(max_length + 2, 40)
             ws.column_dimensions[column_letter].width = adjusted_width
+    
+    # Add AutoFilter to allow manual filtering
+    if is_evolution_data:
+        # Add filter to all data columns
+        ws.auto_filter.ref = f'A5:{get_column_letter(len(groups_df.columns))}{last_row}'
+    else:
+        ws.auto_filter.ref = f'A5:G{last_row}'
     
     # Freeze header row
     ws.freeze_panes = 'A6'
