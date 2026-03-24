@@ -103,6 +103,47 @@ def clean_and_standardize(df, column_config, remove_stop_words=True, case_sensit
 
     return cleaned_df
 
+def calculate_size_similarity_vectorized(customer_sizes, catalog_sizes, tolerance_percent=20):
+    """Vectorized calculation of size similarity matrix."""
+    import re
+    
+    def extract_values(sizes):
+        vals = []
+        for s in sizes:
+            if not s:
+                vals.append(np.nan)
+                continue
+            try:
+                match = re.search(r'(\d*\.?\d+)', str(s))
+                if match:
+                    vals.append(float(match.group(1)))
+                else:
+                    vals.append(np.nan)
+            except:
+                vals.append(np.nan)
+        return np.array(vals)
+
+    c1 = extract_values(customer_sizes)[:, np.newaxis]
+    c2 = extract_values(catalog_sizes)[np.newaxis, :]
+
+    valid_mask = ~np.isnan(c1) & ~np.isnan(c2)
+    larger = np.maximum(c1, c2)
+    smaller = np.minimum(c1, c2)
+    
+    both_zero = (c1 == 0) & (c2 == 0)
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        percent_diff = ((larger - smaller) / larger) * 100
+
+    similarity = 100 * (1 - (percent_diff / tolerance_percent))
+    similarity = np.clip(similarity, 0, 100)
+
+    final_sim = np.where(valid_mask, similarity, 0.0)
+    final_sim = np.where(both_zero & valid_mask, 100.0, final_sim)
+    final_sim = np.nan_to_num(final_sim, nan=0.0)
+    
+    return final_sim
+
 def calculate_size_similarity(size1, size2, tolerance_percent=20):
     """Calculate similarity between two standardized sizes based on their numeric values.
     
@@ -241,6 +282,16 @@ def _chunked_extract_results(customer_texts, catalog_texts, customer_vectors, ca
     match_results = []
     gtin_details = {}
 
+    # Build inverted index for catalog GTINs once, to turn O(N*M) search into O(N)
+    catalog_gtin_index = {}
+    if gtin_weight > 0 and catalog_gtins is not None:
+        for j, cat_pool in enumerate(catalog_gtins):
+            if cat_pool:
+                for gtin, match_type in cat_pool.items():
+                    if gtin not in catalog_gtin_index:
+                        catalog_gtin_index[gtin] = []
+                    catalog_gtin_index[gtin].append((j, match_type))
+
     for chunk_start in range(0, n_customers, chunk_size):
         chunk_end = min(chunk_start + chunk_size, n_customers)
         chunk_len = chunk_end - chunk_start
@@ -276,13 +327,14 @@ def _chunked_extract_results(customer_texts, catalog_texts, customer_vectors, ca
                     chunk_fuzzy[i_local, j] = fuzz.token_set_ratio(cust_text, catalog_texts[j])
 
         # --- Size (vectorized) ---
-        chunk_size_mat = np.zeros((chunk_len, n_catalog))
         if size_weight > 0 and customer_sizes is not None and catalog_sizes is not None:
-            for i_local in range(chunk_len):
-                cs = customer_sizes[chunk_start + i_local]
-                if cs:
-                    for j, cat_size in enumerate(catalog_sizes):
-                        chunk_size_mat[i_local, j] = calculate_size_similarity(cs, cat_size, size_tolerance)
+            chunk_size_mat = calculate_size_similarity_vectorized(
+                customer_sizes[chunk_start:chunk_end], 
+                catalog_sizes, 
+                size_tolerance
+            )
+        else:
+            chunk_size_mat = np.zeros((chunk_len, n_catalog))
 
         # --- GTIN ---
         chunk_gtin = np.zeros((chunk_len, n_catalog))
@@ -293,26 +345,28 @@ def _chunked_extract_results(customer_texts, catalog_texts, customer_vectors, ca
                 cust_pool = customer_gtins[i_global]
                 if not cust_pool:
                     continue
-                for j, cat_pool in enumerate(catalog_gtins):
-                    if not cat_pool:
-                        continue
-                    common = set(cust_pool.keys()) & set(cat_pool.keys())
-                    if not common:
-                        continue
-                    best_conf, best_type, best_gtins = 0.0, 'No Match', []
-                    for gtin in common:
-                        conf, mtype = _get_gtin_confidence(cust_pool[gtin], cat_pool[gtin])
-                        if conf > best_conf:
-                            best_conf, best_type, best_gtins = conf, mtype, [gtin]
-                        elif conf == best_conf:
-                            best_gtins.append(gtin)
-                    if best_conf > 0:
-                        chunk_gtin[i_local, j] = best_conf
-                        chunk_gtin_details[(i_local, j)] = {
-                            'confidence': best_conf,
-                            'match_type': best_type,
-                            'matching_gtins': best_gtins[:3]
-                        }
+                
+                # Use inverted index to find only the catalog products that share GTINs
+                for gtin, cust_match_type in cust_pool.items():
+                    if gtin in catalog_gtin_index:
+                        for j, cat_match_type in catalog_gtin_index[gtin]:
+                            # Calculate confidence directly (only for matching pairs)
+                            conf, mtype = _get_gtin_confidence(cust_match_type, cat_match_type)
+                            
+                            # Keep best match if multiple GTINs overlap
+                            if conf > chunk_gtin[i_local, j]:
+                                chunk_gtin[i_local, j] = conf
+                                chunk_gtin_details[(i_local, j)] = {
+                                    'confidence': conf,
+                                    'match_type': mtype,
+                                    'matching_gtins': [gtin]
+                                }
+                            elif conf == chunk_gtin[i_local, j] and conf > 0:
+                                # Add to existing list if equal confidence
+                                if (i_local, j) in chunk_gtin_details:
+                                    if gtin not in chunk_gtin_details[(i_local, j)]['matching_gtins']:
+                                        if len(chunk_gtin_details[(i_local, j)]['matching_gtins']) < 3:
+                                            chunk_gtin_details[(i_local, j)]['matching_gtins'].append(gtin)
 
         # --- Combine scores (vectorized) ---
         chunk_combined = _calculate_combined_score(
@@ -621,13 +675,15 @@ def _chunked_with_matrices(customer_texts, catalog_texts, customer_vectors, cata
                             chunk_fuzzy[i_local, j] = fuzz.token_set_ratio(customer_text, catalog_text)
         
         # Process size and GTIN similarly...
-        chunk_size_matrix = np.zeros((len(chunk_indices), n_catalog))
         if size_weight > 0 and customer_sizes is not None and catalog_sizes is not None:
-            for i_local, i_global in enumerate(chunk_indices):
-                customer_size = customer_sizes[i_global]
-                if customer_size:
-                    for j, catalog_size in enumerate(catalog_sizes):
-                        chunk_size_matrix[i_local, j] = calculate_size_similarity(customer_size, catalog_size, size_tolerance)
+            chunk_customer_sizes = [customer_sizes[idx] for idx in chunk_indices]
+            chunk_size_matrix = calculate_size_similarity_vectorized(
+                chunk_customer_sizes, 
+                catalog_sizes, 
+                size_tolerance
+            )
+        else:
+            chunk_size_matrix = np.zeros((len(chunk_indices), n_catalog))
         
         chunk_gtin = np.zeros((len(chunk_indices), n_catalog))
         if gtin_weight > 0 and customer_gtins is not None and catalog_gtins is not None:
@@ -874,12 +930,14 @@ def calculate_similarity_vectorized(customer_texts, catalog_texts, customer_vect
         _emit_progress(0.80)
     
     # Size similarity matrix (vectorized)
-    size_matrix = np.zeros((n_customers, n_catalog))
     if size_weight > 0 and customer_sizes is not None and catalog_sizes is not None:
-        for i, customer_size in enumerate(customer_sizes):
-            if customer_size:
-                for j, catalog_size in enumerate(catalog_sizes):
-                    size_matrix[i, j] = calculate_size_similarity(customer_size, catalog_size, size_tolerance)
+        size_matrix = calculate_size_similarity_vectorized(
+            customer_sizes, 
+            catalog_sizes, 
+            size_tolerance
+        )
+    else:
+        size_matrix = np.zeros((n_customers, n_catalog))
     _emit_progress(0.90)
     
     # GTIN similarity matrix - Use consistent approach to restore original behavior
@@ -887,38 +945,40 @@ def calculate_similarity_vectorized(customer_texts, catalog_texts, customer_vect
     gtin_details = {}  # Store match details for results display
     if gtin_weight > 0 and customer_gtins is not None and catalog_gtins is not None:
         
-        # Use simple, reliable nested loop approach (same logic as original)
+        # Build inverted index for catalog GTINs once, to turn O(N*M) search into O(N)
+        catalog_gtin_index = {}
+        for j, cat_pool in enumerate(catalog_gtins):
+            if cat_pool:
+                for gtin, match_type in cat_pool.items():
+                    if gtin not in catalog_gtin_index:
+                        catalog_gtin_index[gtin] = []
+                    catalog_gtin_index[gtin].append((j, match_type))
+        
         for i, cust_pool in enumerate(customer_gtins):
             if not cust_pool:
                 continue
-            for j, cat_pool in enumerate(catalog_gtins):
-                if not cat_pool:
-                    continue
-                
-                # Find intersection of GTIN keys (same as original set intersection)
-                common_gtins = set(cust_pool.keys()) & set(cat_pool.keys())
-                if common_gtins:
-                    # Find the best confidence match among all common GTINs
-                    best_confidence = 0.0
-                    best_match_type = 'No Match'
-                    best_matching_gtins = []
-                    
-                    for gtin in common_gtins:
-                        confidence, match_type = _get_gtin_confidence(cust_pool[gtin], cat_pool[gtin])
-                        if confidence > best_confidence:
-                            best_confidence = confidence
-                            best_match_type = match_type
-                            best_matching_gtins = [gtin]
-                        elif confidence == best_confidence:
-                            best_matching_gtins.append(gtin)
-                    
-                    if best_confidence > 0:
-                        gtin_matrix[i, j] = best_confidence
-                        gtin_details[(i, j)] = {
-                            'confidence': best_confidence,
-                            'match_type': best_match_type,
-                            'matching_gtins': best_matching_gtins[:3]  # Limit to first 3
-                        }
+            
+            # Use inverted index to find only the catalog products that share GTINs
+            for gtin, cust_match_type in cust_pool.items():
+                if gtin in catalog_gtin_index:
+                    for j, cat_match_type in catalog_gtin_index[gtin]:
+                        # Calculate confidence directly (only for matching pairs)
+                        conf, mtype = _get_gtin_confidence(cust_match_type, cat_match_type)
+                        
+                        # Keep best match if multiple GTINs overlap
+                        if conf > gtin_matrix[i, j]:
+                            gtin_matrix[i, j] = conf
+                            gtin_details[(i, j)] = {
+                                'confidence': conf,
+                                'match_type': mtype,
+                                'matching_gtins': [gtin]
+                            }
+                        elif conf == gtin_matrix[i, j] and conf > 0:
+                            # Add to existing list if equal confidence
+                            if (i, j) in gtin_details:
+                                if gtin not in gtin_details[(i, j)]['matching_gtins']:
+                                    if len(gtin_details[(i, j)]['matching_gtins']) < 3:
+                                        gtin_details[(i, j)]['matching_gtins'].append(gtin)
     _emit_progress(0.97)
 
     # FAST VECTORIZED CALCULATIONS - Handle different matching modes properly
