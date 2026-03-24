@@ -217,7 +217,7 @@ def calculate_similarity_memory_efficient(customer_texts, catalog_texts, custome
                                         customer_gtins=None, catalog_gtins=None,
                                         similarity_threshold=50, early_filter=True, enable_multiprocessing=True, batch_size=1000,
                                         within_file_mode=False, progress_callback=None, max_memory_mb=1500,
-                                        restriction_data=None):
+                                        restriction_data=None, max_matches_per_product=5):
     """
     Memory-efficient similarity calculation.
     For large datasets: processes in chunks, extracts results immediately, discards chunk matrices.
@@ -235,8 +235,14 @@ def calculate_similarity_memory_efficient(customer_texts, catalog_texts, custome
 
     _emit_progress(0.02)
 
-    estimated_memory_mb = (n_customers * n_catalog * 8 * 4) / 1024 / 1024
-    use_chunked = estimated_memory_mb > max_memory_mb or n_customers > 10000
+    # Account for TF-IDF, fuzzy, GTIN, size, combined + overhead.
+    estimated_memory_mb = (n_customers * n_catalog * 8 * 6) / 1024 / 1024
+    # Keep behavior conservative for Cloud stability: always chunk for larger pair counts.
+    use_chunked = (
+        (n_customers * n_catalog) > 5_000_000
+        or estimated_memory_mb > max_memory_mb
+        or n_customers > 10000
+    )
 
     if use_chunked:
         print(f"🧠 Chunked mode: {estimated_memory_mb:.0f}MB estimated, processing in chunks")
@@ -246,7 +252,7 @@ def calculate_similarity_memory_efficient(customer_texts, catalog_texts, custome
             customer_sizes, catalog_sizes, size_tolerance,
             customer_gtins, catalog_gtins, similarity_threshold, early_filter,
             enable_multiprocessing, batch_size, within_file_mode, progress_callback,
-            restriction_data
+            restriction_data, max_matches_per_product
         )
     else:
         return calculate_similarity_vectorized(
@@ -263,7 +269,7 @@ def _chunked_extract_results(customer_texts, catalog_texts, customer_vectors, ca
                              customer_sizes, catalog_sizes, size_tolerance,
                              customer_gtins, catalog_gtins, similarity_threshold, early_filter,
                              enable_multiprocessing, batch_size, within_file_mode, progress_callback,
-                             restriction_data=None):
+                             restriction_data=None, max_matches_per_product=5):
     """
     Vectorized chunk processing that never stores full N×N matrices.
     Each chunk is processed fully (TF-IDF, fuzzy, size, GTIN), results above threshold
@@ -278,7 +284,10 @@ def _chunked_extract_results(customer_texts, catalog_texts, customer_vectors, ca
     chunk_size = max(50, min(500, int(200 * 1024 * 1024 / (n_catalog * 8 * 4))))
     print(f"🔄 Chunked extraction: {n_customers:,} products in chunks of {chunk_size:,}")
 
-    # Accumulate only sparse results, not full matrices
+    # Accumulate only sparse results, not full matrices.
+    # Between-files mode can produce huge raw match lists, so keep only top-k per customer on the fly.
+    use_top_k_heaps = (not within_file_mode and max_matches_per_product is not None and max_matches_per_product > 0)
+    top_k_heaps = {} if use_top_k_heaps else None
     match_results = []
     gtin_details = {}
 
@@ -395,16 +404,35 @@ def _chunked_extract_results(customer_texts, catalog_texts, customer_vectors, ca
                 if skip_match:
                     continue
             
-            match_results.append((
+            rec = (
                 i_global, int(j),
                 float(chunk_combined[i_local, j]),
                 float(chunk_tfidf[i_local, j]),
                 float(chunk_fuzzy[i_local, j]),
                 float(chunk_gtin[i_local, j]),
                 float(chunk_size_mat[i_local, j])
-            ))
-            if (i_local, j) in chunk_gtin_details:
-                gtin_details[(i_global, int(j))] = chunk_gtin_details[(i_local, j)]
+            )
+
+            if use_top_k_heaps:
+                heap = top_k_heaps.setdefault(i_global, [])
+                score = rec[2]
+                detail_key = (i_global, int(j))
+
+                if len(heap) < max_matches_per_product:
+                    heapq.heappush(heap, (score, rec))
+                    if (i_local, j) in chunk_gtin_details:
+                        gtin_details[detail_key] = chunk_gtin_details[(i_local, j)]
+                elif score > heap[0][0]:
+                    _, dropped = heapq.heapreplace(heap, (score, rec))
+                    dropped_key = (int(dropped[0]), int(dropped[1]))
+                    if dropped_key in gtin_details:
+                        del gtin_details[dropped_key]
+                    if (i_local, j) in chunk_gtin_details:
+                        gtin_details[detail_key] = chunk_gtin_details[(i_local, j)]
+            else:
+                match_results.append(rec)
+                if (i_local, j) in chunk_gtin_details:
+                    gtin_details[(i_global, int(j))] = chunk_gtin_details[(i_local, j)]
 
         # Discard chunk matrices immediately
         del chunk_tfidf, chunk_fuzzy, chunk_size_mat, chunk_gtin, chunk_combined, chunk_gtin_details
@@ -412,6 +440,18 @@ def _chunked_extract_results(customer_texts, catalog_texts, customer_vectors, ca
 
     if progress_callback is not None:
         progress_callback(1.0, n_customers, n_customers)
+
+    if use_top_k_heaps:
+        limited_results = []
+        limited_gtin_details = {}
+        for heap in top_k_heaps.values():
+            for _, rec in sorted(heap, key=lambda x: x[0], reverse=True):
+                limited_results.append(rec)
+                detail_key = (int(rec[0]), int(rec[1]))
+                if detail_key in gtin_details:
+                    limited_gtin_details[detail_key] = gtin_details[detail_key]
+        match_results = limited_results
+        gtin_details = limited_gtin_details
 
     print(f"✅ Chunked extraction complete: {len(match_results):,} matches found")
     # Return sentinel so app.py knows this is streaming results

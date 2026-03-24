@@ -352,7 +352,8 @@ def main():
                             batch_size=settings['batch_size'],
                             within_file_mode=(settings['matching_mode'] == "Find Similar Within File"),
                             progress_callback=progress_callback,
-                            restriction_data=restriction_data
+                            restriction_data=restriction_data,
+                            max_matches_per_product=settings.get('max_matches_per_product', 5)
                         )
                         
                         # Handle all result shapes returned by processing layer.
@@ -421,31 +422,8 @@ def main():
                     # Check if we have streaming results
                     if streaming_results is not None:
                         print("📊 Converting streaming results to DataFrame...")
-                        # Between-files mode only needs top-k per customer in final output.
-                        # Limit before DataFrame expansion to avoid large post-similarity memory spikes.
-                        if not is_within_file:
-                            filter_progress = st.progress(0, text="Limiting to top matches per customer...")
-                            filter_status = st.empty()
-
-                            def filter_progress_callback(progress, current, total):
-                                filter_progress.progress(
-                                    progress,
-                                    text=f"Limiting to top matches per customer... {current:,} of {total:,}"
-                                )
-                                filter_status.text(f"Evaluated {current:,} of {total:,} potential matches")
-
-                            original_count = len(streaming_results)
-                            streaming_results = _limit_between_file_streaming_results(
-                                streaming_results,
-                                settings['max_matches_per_product'],
-                                progress_callback=filter_progress_callback
-                            )
-                            filter_progress.progress(1.0, text="Top-match filtering complete!")
-                            filter_status.text(
-                                f"✅ Kept {len(streaming_results):,} of {original_count:,} matches for conversion"
-                            )
-                            time.sleep(0.3)
-                            filter_status.empty()
+                        # Chunked extraction already keeps top-k per customer on the fly for between-files mode.
+                        # Avoid redundant second filtering pass here.
 
                         show_streaming_progress = (not is_within_file) or (len(streaming_results) > 10000)
                         streaming_progress = None
