@@ -145,10 +145,20 @@ def convert_streaming_results_to_dataframe(streaming_results, cleaned_customer_d
     customer_out_cols = column_config['customer'].get('output_cols', [])
     catalog_out_cols = column_config['catalog'].get('output_cols', [])
 
+    # Pre-fetch numpy arrays for extremely fast and memory-efficient lookups
+    cust_disp_vals = cleaned_customer_df[customer_display_col].values
+    cat_disp_vals = cleaned_catalog_df[catalog_display_col].values
+    
+    cust_size_vals = cleaned_customer_df.get('standardized_size', pd.Series([''] * len(cleaned_customer_df))).values
+    cat_size_vals = cleaned_catalog_df.get('standardized_size', pd.Series([''] * len(cleaned_catalog_df))).values
+    
+    cust_out_vals = {col: cleaned_customer_df[col].values for col in customer_out_cols if col in cleaned_customer_df.columns}
+    cat_out_vals = {col: cleaned_catalog_df[col].values for col in catalog_out_cols if col in cleaned_catalog_df.columns}
+
     rows = []
     total_records = len(streaming_results)
     for idx, rec in enumerate(streaming_results):
-        if progress_callback is not None and (idx % 250 == 0 or idx == total_records - 1):
+        if progress_callback is not None and (idx % 5000 == 0 or idx == total_records - 1):
             progress_callback((idx + 1) / total_records, idx + 1, total_records)
 
         # Handle both old format (6 elements) and new format (7 elements with size)
@@ -160,16 +170,16 @@ def convert_streaming_results_to_dataframe(streaming_results, cleaned_customer_d
 
         if is_within_file:
             entry = {
-                'Product 1': cleaned_customer_df.iloc[i][customer_display_col],
-                'Product 2': cleaned_catalog_df.iloc[j][catalog_display_col],
+                'Product 1': cust_disp_vals[i],
+                'Product 2': cat_disp_vals[j],
                 'Confidence Score': f"{combined:.2f}%",
                 'TF-IDF Score': f"{tfidf_s:.2f}%",
                 'Fuzzy Score': f"{fuzzy_s:.2f}%",
             }
         else:
             entry = {
-                'Customer Product': cleaned_customer_df.iloc[i][customer_display_col],
-                'Catalog Product': cleaned_catalog_df.iloc[j][catalog_display_col],
+                'Customer Product': cust_disp_vals[i],
+                'Catalog Product': cat_disp_vals[j],
                 'Confidence Score': f"{combined:.2f}%",
                 'TF-IDF Score': f"{tfidf_s:.2f}%",
                 'Fuzzy Score': f"{fuzzy_s:.2f}%",
@@ -186,18 +196,16 @@ def convert_streaming_results_to_dataframe(streaming_results, cleaned_customer_d
         if settings.get('size_weight', 0) > 0 and size_s > 0:
             entry['Size Score'] = f"{size_s:.2f}%"
             # Add standardized sizes for reference
-            customer_size = cleaned_customer_df.iloc[i].get('standardized_size', '')
-            catalog_size = cleaned_catalog_df.iloc[j].get('standardized_size', '')
+            customer_size = cust_size_vals[i]
+            catalog_size = cat_size_vals[j]
             if customer_size and catalog_size:
                 entry[f'Product 1 Size' if is_within_file else 'Customer Size'] = customer_size
                 entry[f'Product 2 Size' if is_within_file else 'Catalog Size'] = catalog_size
 
-        for col in customer_out_cols:
-            if col in cleaned_customer_df.columns:
-                entry[f'Product 1 {col}' if is_within_file else f'Customer {col}'] = cleaned_customer_df.iloc[i][col]
-        for col in catalog_out_cols:
-            if col in cleaned_catalog_df.columns:
-                entry[f'Product 2 {col}' if is_within_file else f'Catalog {col}'] = cleaned_catalog_df.iloc[j][col]
+        for col, vals in cust_out_vals.items():
+            entry[f'Product 1 {col}' if is_within_file else f'Customer {col}'] = vals[i]
+        for col, vals in cat_out_vals.items():
+            entry[f'Product 2 {col}' if is_within_file else f'Catalog {col}'] = vals[j]
 
         rows.append(entry)
 
