@@ -1,0 +1,2 @@
+[build]
+  publish = "product-matching-engine/web-client"
