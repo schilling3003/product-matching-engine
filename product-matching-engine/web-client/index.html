@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Product Matching Engine</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <h1>Product Matching Engine</h1>
+    <p class="subtitle">Match your catalog against a customer list — entirely in your browser. Your files are never uploaded.</p>
+  </header>
+
+  <main class="container">
+    <section class="card" id="upload-section">
+      <h2>1. Upload files</h2>
+      <div class="mode-toggle">
+        <label class="radio-label">
+          <input type="radio" name="matchingMode" value="between" checked />
+          Match two files (catalog vs customer)
+        </label>
+        <label class="radio-label">
+          <input type="radio" name="matchingMode" value="within" />
+          Find similar products within one file
+        </label>
+      </div>
+
+      <div class="upload-grid" id="upload-grid">
+        <div class="upload-box">
+          <label for="catalog-file" class="file-label" id="catalog-label">
+            <span class="file-title">Your product catalog</span>
+            <span class="file-hint">CSV or Excel (.xlsx)</span>
+            <span class="file-name" id="catalog-file-name">No file chosen</span>
+          </label>
+          <input type="file" id="catalog-file" accept=".csv,.xlsx,.xls" />
+        </div>
+        <div class="upload-box" id="customer-upload-box">
+          <label for="customer-file" class="file-label" id="customer-label">
+            <span class="file-title">Customer product list</span>
+            <span class="file-hint">CSV or Excel (.xlsx)</span>
+            <span class="file-name" id="customer-file-name">No file chosen</span>
+          </label>
+          <input type="file" id="customer-file" accept=".csv,.xlsx,.xls" />
+        </div>
+      </div>
+
+      <div class="columns-area" id="columns-area" style="display:none;">
+        <h3>Column configuration</h3>
+        <p class="hint">Detected columns are pre-selected. Adjust them if needed.</p>
+        <div id="column-mappings"></div>
+      </div>
+    </section>
+
+    <section class="card" id="settings-section">
+      <h2>2. Matching settings</h2>
+      <div class="settings-grid">
+        <div class="field">
+          <label for="strictness">Match strictness</label>
+          <select id="strictness">
+            <option value="40">Very Lenient</option>
+            <option value="50" selected>Lenient</option>
+            <option value="60">Balanced</option>
+            <option value="70">Strict</option>
+            <option value="80">Very Strict</option>
+          </select>
+          <span class="field-hint">Higher values require closer matches.</span>
+        </div>
+
+        <div class="field">
+          <label for="max-matches">Matches per product</label>
+          <select id="max-matches">
+            <option value="1">1</option>
+            <option value="3">3</option>
+            <option value="5" selected>5</option>
+            <option value="10">10</option>
+            <option value="20">20</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="text-focus">Text matching focus</label>
+          <select id="text-focus">
+            <option value="exact">Exact spelling</option>
+            <option value="mostly-spelling">Mostly spelling</option>
+            <option value="balanced" selected>Balanced</option>
+            <option value="mostly-meaning">Mostly meaning</option>
+            <option value="meaning">Product meaning</option>
+          </select>
+        </div>
+
+        <div class="field toggle-field">
+          <label>
+            <input type="checkbox" id="enable-text" checked />
+            Use text matching
+          </label>
+        </div>
+
+        <div class="field toggle-field">
+          <label>
+            <input type="checkbox" id="enable-gtin" />
+            Use GTIN / UPC matching
+          </label>
+        </div>
+
+        <div class="field toggle-field">
+          <label>
+            <input type="checkbox" id="enable-size" />
+            Use size / weight matching
+          </label>
+        </div>
+
+        <div class="field size-options" id="size-options" style="display:none;">
+          <label for="size-importance">Size importance</label>
+          <select id="size-importance">
+            <option value="0.1">Minor factor</option>
+            <option value="0.2" selected>Moderate factor</option>
+            <option value="0.3">Major factor</option>
+          </select>
+          <label for="size-tolerance">Size tolerance (%)</label>
+          <input type="range" id="size-tolerance" min="5" max="50" step="5" value="20" />
+          <span class="range-value" id="size-tolerance-value">20%</span>
+        </div>
+
+        <div class="field toggle-field">
+          <label>
+            <input type="checkbox" id="remove-stop-words" checked />
+            Remove common words
+          </label>
+        </div>
+
+        <div class="field toggle-field">
+          <label>
+            <input type="checkbox" id="case-sensitive" />
+            Case-sensitive matching
+          </label>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="run-button" class="primary" disabled>Find Matches</button>
+        <button id="reset-button" class="secondary">Reset</button>
+      </div>
+
+      <div class="progress-area" id="progress-area" style="display:none;">
+        <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+        <p class="progress-text" id="progress-text">Initializing...</p>
+      </div>
+    </section>
+
+    <section class="card" id="results-section" style="display:none;">
+      <h2>3. Results</h2>
+      <div class="summary" id="summary"></div>
+      <div class="results-toolbar">
+        <button id="download-csv" class="secondary">Download CSV</button>
+        <button id="download-excel" class="secondary">Download Excel</button>
+      </div>
+      <div class="table-wrap">
+        <table id="results-table">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="empty-state" id="no-results" style="display:none;">No matches found with the current settings.</p>
+    </section>
+  </main>
+
+  <footer class="app-footer">
+    <p>All processing happens locally in your browser. No data is sent to any server.</p>
+  </footer>
+
+  <script src="vendor/papaparse.min.js"></script>
+  <script src="vendor/xlsx.full.min.js"></script>
+  <script src="vendor/fuzzball.umd.min.js"></script>
+  <script src="js/engine.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
