@@ -1,2 +1,3 @@
 [build]
+  command = "true"
   publish = "product-matching-engine/web-client"
