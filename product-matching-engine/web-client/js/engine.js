@@ -466,7 +466,7 @@ const ProductMatcher = (function () {
         const topK = Math.min(1000, Math.max(50, Math.round(0.1 * nCatalog)));
 
         const withScore = [];
-        for (let j = 0; j < nCatalog; j++) withScore.push({ j, score: tfidfScores[j] });
+        for (let j = 0; j < nCatalog; j++) withScore.push({ j, score: tfidfScores[j] * 100 });
 
         const above = withScore.filter(x => x.score >= minTfidf);
         const topByScore = withScore
